@@ -1,0 +1,50 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+
+issueTrackerURL="https://github.com/example/mcagent/issues"
+
+[[mods]]
+modId="mcagent"
+version="1.0.0"
+displayName="Redi"
+authors="mcagent"
+description='''
+装在 MCphone 手机里的 AI 助手 App。
+
+玩家用自然语言描述任务,助手在游戏运行时内像玩家本人一样行动:
+分析物品属性与合成、阅读已加载模组的代码与语言文件并给出讲解、
+翻译未汉化内容、代发聊天与指令。
+
+硬性边界:助手只能"读取与理解"代码,永远不会修改游戏文件、
+字节码或任何已加载的类;涉及改死代码的任务会被明确拒绝。
+
+An AI assistant app for the MCphone smartphone. Tasks are carried out
+inside the running JVM exactly like a player would (chat, commands,
+registry/recipe/lang inspection). It can READ code but never modify it;
+requests that would require changing dead code are refused.
+
+在手机的"设置 → 模型服务"里配置任意 OpenAI 兼容接口
+(DeepSeek / 智谱 GLM / Kimi / 通义千问 / OpenAI / 自建中转均可)。
+'''
+
+[[dependencies.mcagent]]
+    modId="neoforge"
+    type="required"
+    versionRange="[21.1.200,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.mcagent]]
+    modId="minecraft"
+    type="required"
+    versionRange="[1.21.1]"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.mcagent]]
+    modId="mcphone"
+    type="required"
+    versionRange="[1.8.20,)"
+    ordering="AFTER"
+    side="BOTH"

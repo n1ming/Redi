@@ -1,0 +1,16 @@
+# Gradle
+build/
+.gradle/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# 开发运行环境(测试环境外置在仓库外的 Redi-test-env/)
+run/
+*.log
+
+# 本地系统文件
+.DS_Store
+Thumbs.db

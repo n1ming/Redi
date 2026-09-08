@@ -1,0 +1,47 @@
+plugins {
+    id 'java-library'
+    id 'net.neoforged.moddev' version '2.0.146'
+}
+
+version = '1.0.0'
+group = 'com.mcagent'
+
+base {
+    archivesName = 'mcagent-1.21.1'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+neoForge {
+    // mcphone 要求 [21.1.200,),取 21.1.x 最新
+    version = '21.1.249'
+
+    mods {
+        mcagent {
+            sourceSet sourceSets.main
+        }
+    }
+
+    runs {
+        client {
+            client()
+        }
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // mcphone 的 App SPI 只在编译期需要;运行时由玩家环境提供
+    compileOnly files('libs/mcphone-1.8.20.jar')
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}

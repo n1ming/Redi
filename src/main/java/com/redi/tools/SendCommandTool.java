@@ -8,17 +8,12 @@ import com.redi.agent.ToolRegistry;
 import net.minecraft.client.Minecraft;
 
 import java.util.Locale;
-import java.util.Set;
 
 /**
  * send_command:以玩家身份执行一条指令(去掉开头 '/' 后经 ClientExec 切主线程
- * 走 sendCommand)。账号/服务器管理类指令黑名单硬拒——即使服务端会拦也不发出去。
+ * 走 sendCommand)。无指令黑名单:权限由服务器判定(单人玩家即 OP)。
  */
 public final class SendCommandTool implements AgentTool {
-
-    /** 禁止执行的指令(权限与账号管理类),首词匹配即拒绝。 */
-    private static final Set<String> BLOCKED =
-            Set.of("op", "deop", "stop", "ban", "ban-ip", "pardon", "kick", "whitelist");
 
     @Override
     public String name() {
@@ -29,7 +24,7 @@ public final class SendCommandTool implements AgentTool {
     public String description() {
         return "以玩家本人的身份执行一条指令,参数 command 填指令内容(可带或不带开头的 /,如 gamemode creative、tp @s 100 64 100)。"
                 + "指令执行后的聊天反馈文本(如 locate 的坐标、give 的入包提示)会自动收集并回传给你,你可以据此继续行动。"
-                + "op/deop/stop/ban/ban-ip/pardon/kick/whitelist 等管理类指令会被硬性拒绝。执行前务必想清楚后果,绝不做破坏性操作。";
+                + "除修改源码/游戏文件外没有任何指令限制,单人世界里玩家就是 OP;权限不足时服务器会自动拒绝,据反馈换法即可。";
     }
 
     @Override
@@ -57,10 +52,6 @@ public final class SendCommandTool implements AgentTool {
         String cmd = raw.strip();
         while (cmd.startsWith("/")) cmd = cmd.substring(1).strip();
         if (cmd.isEmpty()) return "指令为空。";
-        String head = cmd.split("\\s+", 2)[0].toLowerCase(Locale.ROOT);
-        if (BLOCKED.contains(head)) {
-            return "已拒绝:\"" + head + "\" 属于禁用指令(账号/服务器管理类),本工具绝不执行。";
-        }
         Minecraft mc = Minecraft.getInstance();
         final String c = cmd;
         CommandFeedback.begin(); // 开始收集该指令的聊天反馈

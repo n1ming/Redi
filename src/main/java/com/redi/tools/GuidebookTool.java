@@ -49,7 +49,7 @@ public final class GuidebookTool implements AgentTool {
                 + "参数:modid 必填;book 可选(手册 id,不填=列出该模组全部手册);"
                 + "category 可选(分类 id,列出该分类下条目);entry 可选(条目路径,读单条目全文,如 crafts/arca_compass);"
                 + "query 可选(关键词全文搜索,中英文都可,命中条目名优先);limit 可选(搜索返回条数,默认 8)。"
-                + "手册原文多为英文,返回后你需翻译成中文再答玩家。";
+                + "手册原文多为英文,返回后你需翻译成中文再答玩家;转述时必须图形化:材料清单用 [items],祭坛/仪式布局用 [ring](中心催化剂+环绕基座),流程用 [flow],配合文字说明步骤。";
     }
 
     @Override

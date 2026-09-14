@@ -68,6 +68,38 @@ final class ChatView {
         }
     }
 
+    /** 图标行(items):横排物品图标;entries 为 (注册名, 数量),数量 ≥2 画右下角标。 */
+    private record IconLine(java.util.List<IconEntry> entries, int gapAfter) implements ChatLine {
+        @Override
+        public int height() {
+            int rows = (entries.size() + 5) / 6; // 每行 6 个
+            return Math.max(1, rows) * 18 + 2;
+        }
+    }
+
+    /** 单个图标条目。 */
+    private record IconEntry(ResourceLocation id, int count) {
+    }
+
+    /** 流程行(flow):图标 + 箭头链,表达转化/步骤(a >> b >> c)。 */
+    private record FlowLine(java.util.List<ResourceLocation> ids, int gapAfter) implements ChatLine {
+        private static final int PER_ROW = 4;
+
+        @Override
+        public int height() {
+            int rows = (ids.size() + PER_ROW - 2) / PER_ROW; // 至少 1 行
+            return Math.max(1, rows) * 18 + 2;
+        }
+    }
+
+    /** 环形布局行(ring):中心图标 + 最多 8 个环绕图标(祭坛仪式等环形结构)。 */
+    private record RingLine(ResourceLocation center, java.util.List<ResourceLocation> around, int gapAfter) implements ChatLine {
+        @Override
+        public int height() {
+            return 78; // 半径 30 + 图标 16 + 上下留白
+        }
+    }
+
     /** 配方网格行:rows 每行 ≤3 格,格子为物品注册名或 null(空槽);result 为产物注册名或 null。 */
     private record GridLine(ResourceLocation[][] rows, ResourceLocation result, int gapAfter) implements ChatLine {
         @Override
@@ -232,8 +264,14 @@ final class ChatView {
                             // 命中区只挂标题行(高度 LINE_H),展开内容由 mouseClicked 里切换
                             thinkHits.add(new ThinkHit(tl, drawY, drawY + LINE_H));
                             renderThink(canvas, tl, drawY);
-                        } else {
-                            renderGrid(canvas, (GridLine) l, drawY);
+                        } else if (l instanceof GridLine gl) {
+                            renderGrid(canvas, gl, drawY);
+                        } else if (l instanceof IconLine il) {
+                            renderIcons(canvas, il, drawY);
+                        } else if (l instanceof FlowLine fl) {
+                            renderFlow(canvas, fl, drawY);
+                        } else if (l instanceof RingLine rl) {
+                            renderRing(canvas, rl, drawY);
                         }
                     }
                     drawY += h + l.gapAfter();
@@ -498,6 +536,13 @@ final class ChatView {
             List<ChatLine> block = new ArrayList<>();
             int p = 0;
             while (p < paragraphs.length) {
+                if (m.role() == ChatModel.Role.ASSISTANT) {
+                    String tp = paragraphs[p].trim().toLowerCase(java.util.Locale.ROOT);
+                    if (tp.startsWith("[items]") || tp.startsWith("[flow]") || tp.startsWith("[ring]")) {
+                        p = collectGraphic(paragraphs, p, block);
+                        continue;
+                    }
+                }
                 if (m.role() == ChatModel.Role.ASSISTANT
                         && paragraphs[p].trim().toLowerCase(java.util.Locale.ROOT).startsWith("[grid]")) {
                     String t = paragraphs[p].trim();
@@ -546,8 +591,17 @@ final class ChatView {
             tl.gapAfter = gap;
             return tl;
         }
-        GridLine gl = (GridLine) line;
-        return new GridLine(gl.rows(), gl.result(), gap);
+        if (line instanceof GridLine gl) {
+            return new GridLine(gl.rows(), gl.result(), gap);
+        }
+        if (line instanceof IconLine il) {
+            return new IconLine(il.entries(), gap);
+        }
+        if (line instanceof FlowLine fl) {
+            return new FlowLine(fl.ids(), gap);
+        }
+        RingLine rl = (RingLine) line;
+        return new RingLine(rl.center(), rl.around(), gap);
     }
 
     /**
@@ -610,6 +664,99 @@ final class ChatView {
                 rows.add(row);
             }
         }
+    }
+
+    /**
+     * 图形标记收集(items/flow/ring):支持单行与跨行(后续段落拼接到闭合标记为止)。
+     * 返回下一个待处理段落下标。
+     */
+    private static int collectGraphic(String[] paragraphs, int start, List<ChatLine> out) {
+        String head = paragraphs[start].trim();
+        String lower = head.toLowerCase(java.util.Locale.ROOT);
+        String tag = lower.startsWith("[items]") ? "items"
+                : lower.startsWith("[flow]") ? "flow" : "ring";
+        String inner = head.substring(head.indexOf(']') + 1);
+        int closeIdx = inner.toLowerCase(java.util.Locale.ROOT).indexOf("[/" + tag + "]");
+        int p = start;
+        if (closeIdx < 0) {
+            // 跨行:继续拼接直到闭合标记(最多 6 段防失控)
+            StringBuilder sb = new StringBuilder(inner.trim());
+            p = start + 1;
+            while (p < paragraphs.length && p <= start + 6) {
+                String seg = paragraphs[p].trim();
+                int c = seg.toLowerCase(java.util.Locale.ROOT).indexOf("[/" + tag + "]");
+                if (c >= 0) {
+                    sb.append(' ').append(seg, 0, c);
+                    break;
+                }
+                sb.append(' ').append(seg);
+                p++;
+            }
+            inner = sb.toString();
+        } else {
+            inner = inner.substring(0, closeIdx);
+        }
+        ChatLine line = switch (tag) {
+            case "items" -> parseItemsLine(inner);
+            case "flow" -> parseFlowLine(inner);
+            default -> parseRingLine(inner);
+        };
+        if (line != null) {
+            out.add(line);
+        }
+        return Math.min(p + 1, paragraphs.length);
+    }
+
+    /** [items]a*2|b|c → 图标行;格式坏的条目跳过。 */
+    private static ChatLine parseItemsLine(String inner) {
+        List<IconEntry> entries = new ArrayList<>();
+        for (String part : inner.split("[|,，]")) {
+            String t = part.trim();
+            if (t.isEmpty()) continue;
+            int count = 1;
+            int star = t.lastIndexOf('*');
+            if (star > 0) {
+                try {
+                    count = Math.max(1, Integer.parseInt(t.substring(star + 1).trim()));
+                } catch (NumberFormatException ignored) {
+                }
+                t = t.substring(0, star).trim();
+            }
+            ResourceLocation id = ResourceLocation.tryParse(normalizeId(t));
+            if (id != null && itemOrNull(id) != null) {
+                entries.add(new IconEntry(id, count));
+            }
+        }
+        return entries.isEmpty() ? null : new IconLine(entries, 0);
+    }
+
+    /** [flow]a >> b >> c → 图标流程链。 */
+    private static ChatLine parseFlowLine(String inner) {
+        List<ResourceLocation> ids = new ArrayList<>();
+        for (String part : inner.split(">>|->|→|>>")) {
+            String t = part.trim();
+            if (t.isEmpty()) continue;
+            ResourceLocation id = ResourceLocation.tryParse(normalizeId(t));
+            if (id != null && itemOrNull(id) != null) {
+                ids.add(id);
+            }
+        }
+        return ids.size() < 2 ? null : new FlowLine(ids, 0);
+    }
+
+    /** [ring]中心|环绕1|环绕2… → 环形布局(最多 8 个环绕,多的忽略)。 */
+    private static ChatLine parseRingLine(String inner) {
+        List<ResourceLocation> ids = new ArrayList<>();
+        for (String part : inner.split("[|,，]")) {
+            String t = part.trim();
+            if (t.isEmpty()) continue;
+            ResourceLocation id = ResourceLocation.tryParse(normalizeId(t));
+            if (id != null && itemOrNull(id) != null) {
+                ids.add(id);
+            }
+        }
+        if (ids.isEmpty()) return null;
+        return new RingLine(ids.get(0), ids.subList(1, Math.min(ids.size(), 9)), 0);
     }
 
     /**
@@ -701,6 +848,69 @@ final class ChatView {
                 }
             }
         }
+    }
+
+    /** 公共:画一个 16px 图标槽(深底+描边+图标);border 换描边色。 */
+    private static void drawIconSlot(GuiGraphics g, Item item, int x, int y, int border) {
+        g.fill(x, y, x + CELL, y + CELL, COLOR_SLOT_BG);
+        g.renderOutline(x, y, CELL, CELL, border);
+        if (item != null) {
+            g.renderItem(new ItemStack(item), x, y);
+        }
+    }
+
+    /** [items]:横排图标,每行 6 个,数量 ≥2 右下角标。 */
+    private static void renderIcons(PhoneCanvas canvas, IconLine il, int drawY) {
+        GuiGraphics g = canvas.graphics();
+        Font font = canvas.font();
+        int perRow = 6;
+        int totalW = Math.min(il.entries().size(), perRow) * 18 - 2;
+        int x0 = canvas.x() + (canvas.width() - totalW) / 2;
+        for (int i = 0; i < il.entries().size(); i++) {
+            IconEntry e = il.entries().get(i);
+            int cx = x0 + (i % perRow) * 18;
+            int cy = drawY + 1 + (i / perRow) * 18;
+            drawIconSlot(g, itemOrNull(e.id()), cx, cy, COLOR_SLOT_EDGE);
+            if (e.count() > 1) {
+                String n = "x" + e.count();
+                g.drawString(font, n, cx + 17 - font.width(n), cy + 9, 0xFFFFFFCC, false);
+            }
+        }
+    }
+
+    /** [flow]:图标链(▶ 相连),每行 4 个图标,超出换行。 */
+    private static void renderFlow(PhoneCanvas canvas, FlowLine fl, int drawY) {
+        GuiGraphics g = canvas.graphics();
+        Font font = canvas.font();
+        int per = FlowLine.PER_ROW;
+        int step = CELL + 10;
+        int totalW = Math.min(fl.ids().size(), per) * step - 10;
+        int x0 = canvas.x() + (canvas.width() - totalW) / 2;
+        for (int i = 0; i < fl.ids().size(); i++) {
+            int cx = x0 + (i % per) * step;
+            int cy = drawY + 1 + (i / per) * 18;
+            drawIconSlot(g, itemOrNull(fl.ids().get(i)), cx, cy, COLOR_SLOT_EDGE);
+            boolean rowEnd = (i % per) == per - 1 || i == fl.ids().size() - 1;
+            if (!rowEnd) {
+                g.drawString(font, "▶", cx + CELL + 1, cy + 4, canvas.style().accentColor(), false);
+            }
+        }
+    }
+
+    /** [ring]:中心图标(accent 描边)+ 环绕图标一圈(祭坛仪式等环形结构)。 */
+    private static void renderRing(PhoneCanvas canvas, RingLine rl, int drawY) {
+        GuiGraphics g = canvas.graphics();
+        int cx = canvas.x() + canvas.width() / 2 - CELL / 2;
+        int cy = drawY + 39 - CELL / 2; // 高 78,中心居中
+        int n = rl.around().size();
+        int r = 30;
+        for (int i = 0; i < n; i++) {
+            double ang = -Math.PI / 2 + i * 2 * Math.PI / Math.max(1, n); // 从正上方起顺时针
+            int ix = (int) Math.round(cx + CELL / 2.0 + r * Math.cos(ang)) - CELL / 2;
+            int iy = (int) Math.round(cy + CELL / 2.0 + r * Math.sin(ang)) - CELL / 2;
+            drawIconSlot(g, itemOrNull(rl.around().get(i)), ix, iy, COLOR_SLOT_EDGE);
+        }
+        drawIconSlot(g, itemOrNull(rl.center()), cx, cy, canvas.style().accentColor());
     }
 
     private static void renderGrid(PhoneCanvas canvas, GridLine gl, int drawY) {

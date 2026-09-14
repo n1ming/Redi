@@ -94,6 +94,7 @@ public final class LlmClient {
      */
     public boolean echoToolCallContent = false;
 
+
     /** 即时中止在途请求:正在等待的 chat() 会立刻抛出"已手动停止"。 */
     public void abortInFlight() {
         var f = inFlight;
@@ -300,7 +301,6 @@ public final class LlmClient {
         JsonObject payload = new JsonObject();
         payload.addProperty("model", config.model == null ? "" : config.model.trim());
         payload.addProperty("temperature", config.temperature);
-        payload.addProperty("max_tokens", config.maxTokens);
         // 思考强度:低(默认)不发参数兼容性最好;中/高映射 OpenAI reasoning_effort
         if ("medium".equalsIgnoreCase(config.thinkingLevel) || "high".equalsIgnoreCase(config.thinkingLevel)) {
             payload.addProperty("reasoning_effort", config.thinkingLevel.toLowerCase(java.util.Locale.ROOT));

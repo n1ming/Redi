@@ -1,6 +1,5 @@
 package com.redi.plugin;
 
-import com.redi.RediMod;
 import com.redi.plugin.builtin.ActionToolsPlugin;
 import com.redi.plugin.builtin.LocalDocsPlugin;
 import com.redi.plugin.builtin.MemoryToolsPlugin;
@@ -18,6 +17,8 @@ import java.util.Map;
  * 保留各插件作用域,后续可按 id 热卸载(dispose 即还原)。
  */
 public final class PluginManager {
+
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger("redi");
     private static final Map<String, AgentContext> SCOPES = new LinkedHashMap<>();
     /** 插件 id → 该插件登记的工具名(供插件列表面板展示)。 */
     private static final Map<String, List<String>> PLUGIN_TOOLS = new LinkedHashMap<>();
@@ -65,10 +66,10 @@ public final class PluginManager {
             }
             SCOPES.put(plugin.id(), scope);
             PLUGIN_TOOLS.put(plugin.id(), added);
-            RediMod.LOGGER.info("[redi] 插件已加载: {} (工具: {})", plugin.id(), added);
+            LOG.info("[redi] 插件已加载: {} (工具: {})", plugin.id(), added);
         } catch (Throwable t) {
             scope.dispose(); // 回滚半个装配件的副作用
-            RediMod.LOGGER.warn("[redi] 插件加载失败: {} ({})", plugin.id(), t.toString());
+            LOG.warn("[redi] 插件加载失败: {} ({})", plugin.id(), t.toString());
         }
     }
 
@@ -83,7 +84,7 @@ public final class PluginManager {
         if (scope != null) {
             scope.dispose();
             PLUGIN_TOOLS.remove(pluginId);
-            RediMod.LOGGER.info("[redi] 插件已卸载: {}", pluginId);
+            LOG.info("[redi] 插件已卸载: {}", pluginId);
         }
     }
 

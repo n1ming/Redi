@@ -7,7 +7,6 @@ import com.redi.config.AgentConfig;
 import com.redi.llm.LlmClient;
 import com.redi.llm.LlmMessage;
 import com.redi.llm.ToolCall;
-import net.minecraft.client.resources.language.I18n;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -111,11 +110,8 @@ public final class AgentEngine {
         String text = userText.trim();
         chat.append(ChatModel.Role.USER, text);
         if (!AgentConfig.get().isConfigured()) {
-            String msg = I18n.get("redi.chat.not_configured");
-            if (msg.equals("redi.chat.not_configured")) {
-                msg = "尚未配置模型接口。请点右上角齿轮进设置,填好 base_url、API Key 和模型名。";
-            }
-            chat.append(ChatModel.Role.ERROR, msg);
+            chat.append(ChatModel.Role.ERROR,
+                    "尚未配置模型接口。请点右上角齿轮进设置,填好 base_url、API Key 和模型名。");
             return;
         }
         cancelled = false;
@@ -225,7 +221,7 @@ public final class AgentEngine {
                 }
                 String content = resp.content() == null ? "" : resp.content().trim();
                 if (!resp.hasToolCalls() && content.isEmpty()) {
-                    // 空响应:用完全相同的请求自动重试一次,避免聊天界面静默空白
+                    // 空响应:同请求自动重试一次,避免聊天界面静默空白
                     resp = request(client, chat);
                     if (resp == null) return;
                     content = resp.content() == null ? "" : resp.content().trim();
@@ -307,6 +303,7 @@ public final class AgentEngine {
                 return client.chat(buildRequest(), ToolRegistry.schemas());
             }
         } catch (com.redi.llm.LlmClient.BadRequestException e) {
+
             // 400 自适配重试(全程备份,失败即恢复原对话,不污染后续):
             // ①结构化裁剪(保用户锚,最多 6 轮) ②恢复完整历史 + 切 content 回显格式(null/省略)
             // ③恢复完整 + 裁剪 + 切回

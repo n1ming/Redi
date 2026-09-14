@@ -2,7 +2,6 @@ package com.redi.agent;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.redi.RediMod;
 import com.redi.llm.LlmMessage;
 import com.redi.llm.ToolCall;
 
@@ -31,6 +30,8 @@ import java.util.stream.Stream;
  * {@link #revision()} 供视图比对决定是否重载列表(save/delete 成功都会推进)。</p>
  */
 public final class ChatStore {
+
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger("redi");
 
     /** 列表行元数据:fileName 为纯文件名,供 {@link #loadInto(String)} / {@link #delete(String)} 使用。 */
     public record SessionMeta(String fileName, String title, long savedAt, int messageCount) {
@@ -120,7 +121,7 @@ public final class ChatStore {
             Files.writeString(currentFile, GSON.toJson(s), StandardCharsets.UTF_8);
             revision++;
         } catch (Exception e) {
-            RediMod.LOGGER.warn("[redi] 保存历史会话失败: {}", e.toString());
+            LOG.warn("[redi] 保存历史会话失败: {}", e.toString());
         }
     }
 
@@ -195,7 +196,7 @@ public final class ChatStore {
             // 之后继续写回该会话文件(原地更新)
             currentFile = p;
         } catch (Exception e) {
-            RediMod.LOGGER.warn("[redi] 读取历史会话失败: {}", e.toString());
+            LOG.warn("[redi] 读取历史会话失败: {}", e.toString());
         }
     }
 
@@ -210,7 +211,7 @@ public final class ChatStore {
                 revision++;
             }
         } catch (Exception e) {
-            RediMod.LOGGER.warn("[redi] 删除历史会话失败: {}", e.toString());
+            LOG.warn("[redi] 删除历史会话失败: {}", e.toString());
         }
     }
 

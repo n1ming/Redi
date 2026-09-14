@@ -32,7 +32,6 @@ public final class AgentConfig {
     /** 模型思考强度:low(默认,不发参数)/ medium / high(请求体带 reasoning_effort)。 */
     public String thinkingLevel = "low";
     public double temperature = 0.7;
-    public int maxTokens = 8192;
     /** 单次 HTTP 请求超时(秒)。 */
     public int timeoutSeconds = 300;
     /** 工具调用循环的最大轮数;0 = 不限制(仅保留重复调用与绝对上限保护)。 */
@@ -66,7 +65,6 @@ public final class AgentConfig {
                 this.model = loaded.model;
                 this.thinkingLevel = loaded.thinkingLevel == null ? "low" : loaded.thinkingLevel;
                 this.temperature = loaded.temperature;
-                this.maxTokens = loaded.maxTokens;
                 this.timeoutSeconds = loaded.timeoutSeconds;
                 this.maxToolIterations = Math.max(0, loaded.maxToolIterations);
                 this.proxyHost = loaded.proxyHost;

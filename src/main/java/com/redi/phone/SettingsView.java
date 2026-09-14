@@ -503,7 +503,6 @@ final class SettingsView {
         c.apiKey = apiKeyBox.getValue().trim();
         c.model = modelBox.getValue().trim();
         c.temperature = src.temperature;
-        c.maxTokens = src.maxTokens;
         c.timeoutSeconds = src.timeoutSeconds;
         c.maxToolIterations = src.maxToolIterations;
         c.proxyHost = src.proxyHost;

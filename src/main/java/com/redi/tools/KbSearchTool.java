@@ -7,7 +7,7 @@ import com.redi.agent.ToolRegistry;
 import com.redi.kb.KnowledgeBase;
 
 /**
- * kb_search:检索模组内置中文知识库(《指令速查》《选择器与坐标》《物品与组件》),
+ * kb_search:检索本地知识库:游戏指令/选择器/物品组件(中文)+ NeoForge 1.21.1 官方 API 文档(英文),
  * 纯本地文本检索,不走网络、不读游戏状态,可直接在引擎线程执行。
  */
 public final class KbSearchTool implements AgentTool {
@@ -19,7 +19,8 @@ public final class KbSearchTool implements AgentTool {
 
     @Override
     public String description() {
-        return "检索本地内置中文知识库(《指令速查》《选择器与坐标》《物品与组件》)。"
+        return "检索本地知识库:游戏指令/选择器/物品组件(中文)+ NeoForge 1.21.1 官方 API 文档(英文)。"
+                + "写代码思路、查 NeoForge/Minecraft 类与接口用法(注册物品/方块/事件/网络包等)时先查这里,按英文名检索(如 DeferredRegister RegisterEvent payload);"
                 + "回答指令用法、选择器写法、物品组件语法、附魔/食物/坐标等游戏常识问题前,先用它查一次(通常一次调用即可),"
                 + "不要凭记忆猜测语法。参数 query 必填(可多个空格分隔的检索词,支持中文);"
                 + "file 可选,指定只在某个文件里查(commands / selectors / items_basics,可带 .md,支持前缀);"

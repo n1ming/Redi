@@ -35,6 +35,15 @@ public final class KnowledgeBase {
             {"/assets/redi/kb/commands.md", "指令速查"},
             {"/assets/redi/kb/selectors.md", "选择器与坐标"},
             {"/assets/redi/kb/items_basics.md", "物品与组件"},
+            // NeoForge 1.21.1 官方文档(英文原文,API 查询用;来源 neoforged/Documentation)
+            {"/assets/redi/kb/neoforge_start.md", "NeoForge 入门与概念"},
+            {"/assets/redi/kb/neoforge_blocks.md", "NeoForge 方块与方块实体"},
+            {"/assets/redi/kb/neoforge_items.md", "NeoForge 物品与容器"},
+            {"/assets/redi/kb/neoforge_entities.md", "NeoForge 实体"},
+            {"/assets/redi/kb/neoforge_network.md", "NeoForge 网络与进阶"},
+            {"/assets/redi/kb/neoforge_data.md", "NeoForge 数据与服务器资源"},
+            {"/assets/redi/kb/neoforge_client.md", "NeoForge 客户端与渲染"},
+            {"/assets/redi/kb/neoforge_misc.md", "NeoForge 杂项与世界生成"},
     };
 
     /** 每节正文的最大输出长度,超出截断。 */

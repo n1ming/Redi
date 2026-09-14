@@ -53,7 +53,7 @@ final class ChatView {
     private static final int COLOR_DIVIDER = 0x33FFFFFF;
 
     /** 折行后的一行。行高可变:文本行 9px、网格行 rows*18+2px;行尾附加像素(消息间空隙)。 */
-    private sealed interface ChatLine {
+    sealed interface ChatLine {
         /** 本行占用高度(不含消息间空隙),吸底 / 滚动钳制 / contentH 都用它。 */
         int height();
 
@@ -69,7 +69,7 @@ final class ChatView {
     }
 
     /** 图标行(items):横排物品图标;entries 为 (注册名, 数量),数量 ≥2 画右下角标。 */
-    private record IconLine(java.util.List<IconEntry> entries, int gapAfter) implements ChatLine {
+    record IconLine(java.util.List<IconEntry> entries, int gapAfter) implements ChatLine {
         @Override
         public int height() {
             int rows = (entries.size() + 5) / 6; // 每行 6 个
@@ -78,11 +78,11 @@ final class ChatView {
     }
 
     /** 单个图标条目。 */
-    private record IconEntry(ResourceLocation id, int count) {
+    record IconEntry(ResourceLocation id, int count) {
     }
 
     /** 流程行(flow):图标 + 箭头链,表达转化/步骤(a >> b >> c)。 */
-    private record FlowLine(java.util.List<ResourceLocation> ids, int gapAfter) implements ChatLine {
+    record FlowLine(java.util.List<ResourceLocation> ids, int gapAfter) implements ChatLine {
         private static final int PER_ROW = 4;
 
         @Override
@@ -93,7 +93,7 @@ final class ChatView {
     }
 
     /** 环形布局行(ring):中心图标 + 最多 8 个环绕图标(祭坛仪式等环形结构)。 */
-    private record RingLine(ResourceLocation center, java.util.List<ResourceLocation> around, int gapAfter) implements ChatLine {
+    record RingLine(ResourceLocation center, java.util.List<ResourceLocation> around, int gapAfter) implements ChatLine {
         @Override
         public int height() {
             return 78; // 半径 30 + 图标 16 + 上下留白
@@ -101,7 +101,7 @@ final class ChatView {
     }
 
     /** 配方网格行:rows 每行 ≤3 格,格子为物品注册名或 null(空槽);result 为产物注册名或 null。 */
-    private record GridLine(ResourceLocation[][] rows, ResourceLocation result, int gapAfter) implements ChatLine {
+    record GridLine(ResourceLocation[][] rows, ResourceLocation result, int gapAfter) implements ChatLine {
         @Override
         public int height() {
             return rows.length * 18 + 2; // rows*18 + 上下各 1px
@@ -707,53 +707,62 @@ final class ChatView {
         return Math.min(p + 1, paragraphs.length);
     }
 
-    /** [items]a*2|b|c → 图标行;格式坏的条目跳过。 */
-    private static ChatLine parseItemsLine(String inner) {
-        List<IconEntry> entries = new ArrayList<>();
-        for (String part : inner.split("[|,，]")) {
-            String t = part.trim();
-            if (t.isEmpty()) continue;
-            int count = 1;
-            int star = t.lastIndexOf('*');
-            if (star > 0) {
-                try {
-                    count = Math.max(1, Integer.parseInt(t.substring(star + 1).trim()));
-                } catch (NumberFormatException ignored) {
-                }
+    /** 条目解析(带数量):id + count,数量默认 1;id 坏返回 null。 */
+    static IconEntry parseEntry(String raw) {
+        String t = raw.trim();
+        if (t.isEmpty()) return null;
+        int count = 1;
+        int star = t.lastIndexOf('*');
+        if (star > 0) {
+            try {
+                count = Math.max(1, Integer.parseInt(t.substring(star + 1).trim()));
+            } catch (NumberFormatException ignored) {
+            }
+            t = t.substring(0, star).trim();
+        }
+        ResourceLocation id = ResourceLocation.tryParse(normalizeId(t));
+        return id == null ? null : new IconEntry(id, count);
+    }
+
+    /** 仅 id 解析(数量后缀容忍丢弃):id 坏返回 null。 */
+    static ResourceLocation parseIdOnly(String raw) {
+        String t = raw.trim();
+        int star = t.lastIndexOf('*');
+        if (star > 0) {
+            String tail = t.substring(star + 1).trim();
+            if (!tail.isEmpty() && tail.chars().allMatch(Character::isDigit)) {
                 t = t.substring(0, star).trim();
             }
-            ResourceLocation id = ResourceLocation.tryParse(normalizeId(t));
-            if (id != null && itemOrNull(id) != null) {
-                entries.add(new IconEntry(id, count));
-            }
+        }
+        return t.isEmpty() ? null : ResourceLocation.tryParse(normalizeId(t));
+    }
+
+    /** [items]a*2|b|c → 图标行;格式坏的条目跳过。 */
+    static ChatLine parseItemsLine(String inner) {
+        List<IconEntry> entries = new ArrayList<>();
+        for (String part : inner.split("[|,，]")) {
+            IconEntry e = parseEntry(part);
+            if (e != null) entries.add(e);
         }
         return entries.isEmpty() ? null : new IconLine(entries, 0);
     }
 
     /** [flow]a >> b >> c → 图标流程链。 */
-    private static ChatLine parseFlowLine(String inner) {
+    static ChatLine parseFlowLine(String inner) {
         List<ResourceLocation> ids = new ArrayList<>();
-        for (String part : inner.split(">>|->|→|>>")) {
-            String t = part.trim();
-            if (t.isEmpty()) continue;
-            ResourceLocation id = ResourceLocation.tryParse(normalizeId(t));
-            if (id != null && itemOrNull(id) != null) {
-                ids.add(id);
-            }
+        for (String part : inner.split(">>|->|→")) {
+            ResourceLocation id = parseIdOnly(part);
+            if (id != null) ids.add(id);
         }
         return ids.size() < 2 ? null : new FlowLine(ids, 0);
     }
 
     /** [ring]中心|环绕1|环绕2… → 环形布局(最多 8 个环绕,多的忽略)。 */
-    private static ChatLine parseRingLine(String inner) {
+    static ChatLine parseRingLine(String inner) {
         List<ResourceLocation> ids = new ArrayList<>();
         for (String part : inner.split("[|,，]")) {
-            String t = part.trim();
-            if (t.isEmpty()) continue;
-            ResourceLocation id = ResourceLocation.tryParse(normalizeId(t));
-            if (id != null && itemOrNull(id) != null) {
-                ids.add(id);
-            }
+            ResourceLocation id = parseIdOnly(part); // 剥 *n(模型常按示例写 *8)
+            if (id != null) ids.add(id);
         }
         if (ids.isEmpty()) return null;
         return new RingLine(ids.get(0), ids.subList(1, Math.min(ids.size(), 9)), 0);
@@ -763,7 +772,7 @@ final class ChatView {
      * 单行网格兜底:[grid]a|b|c|d|e => 产物[/grid] 全在一行(模型没按格式换行)。
      * 摊平全部单元格按 3 格一行摆放,最多 3 行 9 格。
      */
-    private static void parseGridInline(String inner, List<ChatLine> out) {
+    static void parseGridInline(String inner, List<ChatLine> out) {
         String s = inner.trim();
         if (s.isEmpty()) {
             return;

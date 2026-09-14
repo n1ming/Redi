@@ -22,10 +22,7 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Rarity;
 import net.minecraft.world.item.TooltipFlag;
 import net.minecraft.world.item.alchemy.PotionContents;
-import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.crafting.Recipe;
-import net.minecraft.world.item.crafting.RecipeHolder;
-import net.minecraft.world.item.crafting.RecipeType;
 import net.minecraft.world.item.component.CustomData;
 import net.minecraft.world.item.component.ItemAttributeModifiers;
 import net.minecraft.world.item.component.ItemLore;
@@ -35,7 +32,6 @@ import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.level.Level;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -173,7 +169,7 @@ public final class InspectItemTool implements AgentTool {
         // 获得方式与合成:最多 3 条产出配方的材料清单+配方类型(本工具内遍历四类配方)
         try {
             sb.append("获得方式与合成:\n");
-            List<String> recipes = produceSummaries(lvl, id.toString(), 3);
+            List<String> recipes = FindRecipesTool.summariesFor(lvl, id.toString(), 3);
             if (recipes.isEmpty()) {
                 sb.append("- 未找到产出它的配方(可能靠探索、交易或其他方式获得)\n");
             } else {
@@ -183,59 +179,6 @@ public final class InspectItemTool implements AgentTool {
         } catch (Throwable ignored) {
         }
         return ToolRegistry.trunc(sb.toString(), 6000);
-    }
-
-    /**
-     * 产出目标物品的配方简表(材料清单+配方类型;最多 limit 条)。须在主线程调用。
-     * 每行:- 类型 | 材料: 注册名×数量, ... | 可随身 2x2 合成 / 需 3x3(工作台)
-     * (FindRecipesTool 只提供配方 id 列表,故在本工具内实现简版材料汇总。)
-     */
-    private static List<String> produceSummaries(Level lvl, String itemId, int limit) {
-        List<String> out = new ArrayList<>();
-        List<RecipeHolder<? extends Recipe<?>>> all = new ArrayList<>();
-        all.addAll(lvl.getRecipeManager().getAllRecipesFor(RecipeType.CRAFTING));
-        all.addAll(lvl.getRecipeManager().getAllRecipesFor(RecipeType.SMELTING));
-        all.addAll(lvl.getRecipeManager().getAllRecipesFor(RecipeType.SMITHING));
-        all.addAll(lvl.getRecipeManager().getAllRecipesFor(RecipeType.STONECUTTING));
-        for (RecipeHolder<? extends Recipe<?>> h : all) {
-            Recipe<?> r = h.value();
-            ItemStack result = r.getResultItem(lvl.registryAccess());
-            if (result == null || result.isEmpty()
-                    || !BuiltInRegistries.ITEM.getKey(result.getItem()).toString().equals(itemId)) {
-                continue;
-            }
-            // 材料清单:注册名×数量(多选一记“或等价物”,空材料表记“任意物品”)
-            LinkedHashMap<String, Integer> mats = new LinkedHashMap<>();
-            for (Ingredient ing : r.getIngredients()) {
-                ItemStack[] opts = ing.getItems();
-                if (opts == null || opts.length == 0) {
-                    mats.merge("任意物品", 1, Integer::sum);
-                    continue;
-                }
-                String name = BuiltInRegistries.ITEM.getKey(opts[0].getItem()).toString();
-                if (opts.length > 1) name += "(或等价物)";
-                mats.merge(name, 1, Integer::sum);
-            }
-            String type = BuiltInRegistries.RECIPE_TYPE.getKey(r.getType()).getPath();
-            StringBuilder line = new StringBuilder("- ").append(type).append(" | 材料: ");
-            if (mats.isEmpty()) {
-                line.append("(无)");
-            } else {
-                boolean first = true;
-                for (Map.Entry<String, Integer> e : mats.entrySet()) {
-                    if (!first) line.append(", ");
-                    line.append(e.getKey()).append('×').append(e.getValue());
-                    first = false;
-                }
-            }
-            // 2x2 / 3x3 判断:合成类配方且材料格数≤4 即可随身 2x2 完成
-            if (r.getType() == RecipeType.CRAFTING) {
-                line.append(r.getIngredients().size() <= 4 ? " | 可随身 2x2 合成" : " | 需 3x3(工作台)");
-            }
-            out.add(line.toString());
-            if (out.size() >= limit) break;
-        }
-        return out;
     }
 
     /** 按组件注册名给出“组件 id(中文释义): 要点”;不认识的组件返回 null。 */

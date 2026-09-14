@@ -169,6 +169,29 @@ public final class FindRecipesTool implements AgentTool {
         return out;
     }
 
+    /**
+     * 产出目标物品的 JEI 式配方摘要(供 inspect_item 复用;全类型覆盖 + 工作站 + [grid])。
+     * 须在主线程调用。返回空列表 = 注册表无产出配方。
+     */
+    public static List<String> summariesFor(Level lvl, String itemId, int limit) {
+        List<String> out = new ArrayList<>();
+        for (RecipeHolder<? extends Recipe<?>> h : collectAll(lvl)) {
+            ItemStack result;
+            try {
+                result = h.value().getResultItem(lvl.registryAccess());
+            } catch (Throwable t) {
+                continue;
+            }
+            if (result == null || result.isEmpty()
+                    || !BuiltInRegistries.ITEM.getKey(result.getItem()).toString().equals(itemId)) {
+                continue;
+            }
+            out.add(formatRecipe(lvl, h.value(), h.id().toString()));
+            if (out.size() >= limit) break;
+        }
+        return out;
+    }
+
     /** 产出该物品的配方 id 列表(inspect_item 复用)。 */
     static List<String> produceIds(Level lvl, String itemId, int limit) {
         List<String> out = new ArrayList<>();
@@ -186,7 +209,7 @@ public final class FindRecipesTool implements AgentTool {
     // ---------------------------------------------------------------- 格式化
 
     /** 单条配方(JEI 式):分类中文名 + 工作站 + 材料/网格 + 产物。 */
-    private String formatRecipe(Level lvl, Recipe<?> r, String rid) {
+    private static String formatRecipe(Level lvl, Recipe<?> r, String rid) {
         String typeKey = BuiltInRegistries.RECIPE_TYPE.getKey(r.getType()).toString();
         String[] cat = CATEGORIES.get(typeKey);
         StringBuilder b = new StringBuilder();

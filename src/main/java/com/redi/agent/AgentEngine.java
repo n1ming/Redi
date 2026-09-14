@@ -533,6 +533,7 @@ public final class AgentEngine {
 
     /** 系统提示:身份 + 按取证优先级分层的工具清单(由注册表自动生成,新插件自动进层)+ 硬性规则。 */
     private String buildSystemPrompt() {
+        StringBuilder kb = new StringBuilder();
         StringBuilder mem = new StringBuilder();
         StringBuilder loc = new StringBuilder();
         StringBuilder web = new StringBuilder();
@@ -540,6 +541,10 @@ public final class AgentEngine {
         for (AgentTool t : ToolRegistry.all()) {
             String line = "- " + toolLabel(t.name()) + ": "
                     + ToolRegistry.trunc(t.description().replace("\n", " "), 130) + "\n";
+            if (t.name().equals("kb_search")) {
+                kb.append(line);
+                continue;
+            }
             switch (ToolRegistry.tier(t.name())) {
                 case MEMORY -> mem.append(line);
                 case LOCAL -> loc.append(line);
@@ -551,13 +556,16 @@ public final class AgentEngine {
         sb.append("你的名字是 Redi(取自 Redstone + AI,谐音 ready——随叫随到的方块助手),装在 Minecraft 玩家手机里,运行在 Minecraft 1.21.1(NeoForge)的 JVM 内。")
           .append("你可以像玩家本人一样观察与行动:读游戏状态、读模组的代码与资源、替玩家发聊天消息或执行指令。\n\n")
           .append("== 取证优先级(硬性要求)==\n")
-          .append("找任何信息必须按顺序尝试:第一优先【内存】→ 第二优先【本地】→ 最后手段【联网】。\n")
-          .append("上一层查不到、或信息明显不足以回答时,才允许进入下一层;严禁跳过前两层直接联网。\n\n")
-          .append("== 第一优先 · 内存实时读取(JVM 内的游戏状态)==\n")
+          .append("找任何信息必须按顺序尝试:第一优先【本地知识库】→ 第二优先【内存】→ 第三优先【本地模组文件】→ 最后手段【联网】。\n")
+          .append("知识库已内置指令/物品常识与 NeoForge 官方 API 文档,凡知识类问题先 kb_search;"
+                  + "上一层查不到或信息不足才进入下一层;严禁跳层直接联网。\n\n")
+          .append("== 第一优先 · 本地知识库(内置文档,查得最快)==\n")
+          .append(kb)
+          .append("\n== 第二优先 · 内存实时读取(JVM 内的游戏状态)==\n")
           .append(mem)
-          .append("\n== 第二优先 · 本地文件与知识库(模组 jar / 内置文档)==\n")
+          .append("\n== 第三优先 · 本地模组文件(jar / 手册)==\n")
           .append(loc)
-          .append("\n== 最后手段 · 联网(前两层查不到才用)==\n")
+          .append("\n== 最后手段 · 联网(以上各层都查不到才用)==\n")
           .append(web)
           .append("\n== 行动类(改变游戏状态,不属于取证)==\n")
           .append(act)
@@ -578,7 +586,7 @@ public final class AgentEngine {
           .append("[/grid]\n")
           .append("手机界面会渲染成物品图标网格,严格遵守格式。[grid] 标记后必须立刻换行,配方行各自独占一行,=> 产物行独占一行,绝不要把整个网格写成一行——写成一行将无法渲染。@NL@9. 获取方式必须匹配真实途径:只有工作台配方才用 [grid] 网格;一切非工作台的合成与获取方式(召唤、献祭、仪式、酿造、转化、战利品等),先用 read_guidebook 查手册,再按手册原文用文字描述(材料/祭坛/步骤),绝不要硬塞进工作台网格;注册表里查不到合成配方不代表没有获取途径。@NL@\n")
           .append("10. 不要连续重复调用相同工具+相同参数;若两次调用没有获得新信息,直接根据已有信息回答。\n")
-          .append("11. 严格遵守取证优先级分层(内存→本地→联网);指令/物品常识先 kb_search,精确语法用 command_usage,不要凭记忆猜测指令语法。联网只允许 GET 读取,严禁向任何网页提交账号、密钥、聊天记录或本机文件内容。\n")
+          .append("11. 严格遵守取证优先级分层(知识库→内存→本地文件→联网);指令/物品常识先 kb_search,精确语法用 command_usage,不要凭记忆猜测指令语法。联网只允许 GET 读取,严禁向任何网页提交账号、密钥、聊天记录或本机文件内容。\n")
           .append("12. 回答必须一次性写完整:把结论、步骤、配方、用法、注意事项全部说完再结束;问多项内容就逐项全覆盖,问清单就列全,绝不能只答一部分就停下。查证类任务查到足以回答就收手作答,不要为穷尽而反复调用工具。");
         return sb.toString();
     }

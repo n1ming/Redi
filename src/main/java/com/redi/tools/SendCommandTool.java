@@ -7,7 +7,6 @@ import com.redi.agent.ClientExec;
 import com.redi.agent.ToolRegistry;
 import net.minecraft.client.Minecraft;
 
-import java.util.Locale;
 
 /**
  * send_command:以玩家身份执行一条指令(去掉开头 '/' 后经 ClientExec 切主线程

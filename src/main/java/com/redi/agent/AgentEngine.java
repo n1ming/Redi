@@ -88,6 +88,8 @@ public final class AgentEngine {
         m.put("send_chat", "发聊天");
         m.put("send_command", "执行指令");
         m.put("read_guidebook", "读模组手册");
+        m.put("read_file", "读本机文件");
+        m.put("list_files", "列目录");
         m.put("web_search", "联网搜索");
         m.put("web_read", "读网页");
         return m;
@@ -101,14 +103,22 @@ public final class AgentEngine {
 
     /** 提交一条玩家消息,异步执行;状态与结果都反映在 ChatModel 上。 */
     public void submit(String userText) {
+        submit(userText, userText);
+    }
+
+    /**
+     * 提交(显示文本与任务文本可不同):@文件导入用 —— 聊天气泡显示玩家原文,
+     * 发给引擎的任务文本附带文件内容(见 {@link com.redi.tools.FileImport})。
+     */
+    public void submit(String displayText, String taskText) {
         ChatModel chat = ChatModel.get();
         if (chat.busy()) {
             chat.append(ChatModel.Role.NOTE, "上一个任务还在进行中,请等它结束或点「■」停止。");
             return;
         }
-        if (userText == null || userText.isBlank()) return;
-        String text = userText.trim();
-        chat.append(ChatModel.Role.USER, text);
+        if (taskText == null || taskText.isBlank()) return;
+        String text = taskText.trim();
+        chat.append(ChatModel.Role.USER, displayText == null || displayText.isBlank() ? text : displayText.trim());
         if (!AgentConfig.get().isConfigured()) {
             chat.append(ChatModel.Role.ERROR,
                     "尚未配置模型接口。请点右上角齿轮进设置,填好 base_url、API Key 和模型名。");

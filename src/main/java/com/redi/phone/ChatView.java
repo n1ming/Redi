@@ -1087,6 +1087,7 @@ final class ChatView {
         }
         input.setValue("");
         pinned = true;
-        AgentEngine.get().submit(text);
+        // @路径 导入:气泡显示原文,任务文本附文件内容
+        AgentEngine.get().submit(text, com.redi.tools.FileImport.enrich(text));
     }
 }

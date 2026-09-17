@@ -11,7 +11,7 @@ import java.util.regex.Pattern;
  * 附加为任务上下文(聊天气泡仍显示玩家原文)。
  *
  * <p>支持的形式:Windows 绝对(@E:\docs\a.md)、POSIX 绝对(@/home/u/a.txt)、
- * 相对(@config/redi/settings.json);token 到第一个空白为止(路径含空格时
+ * 相对(@config/redi/settings.json);图片会转成像素矩阵;token 到第一个空白为止(路径含空格时
  * 请先确认无空格或用相对路径)。每个文件最多内联 6000 字符,与 read_file 一致。</p>
  */
 public final class FileImport {

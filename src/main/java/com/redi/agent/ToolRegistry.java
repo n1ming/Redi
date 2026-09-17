@@ -68,6 +68,7 @@ public final class ToolRegistry {
             Map.entry("command_usage", Tier.LOCAL),
             Map.entry("read_file", Tier.LOCAL),
             Map.entry("list_files", Tier.LOCAL),
+            Map.entry("image_matrix", Tier.LOCAL),
             Map.entry("web_search", Tier.WEB),
             Map.entry("web_read", Tier.WEB),
             Map.entry("craft_item", Tier.ACTION),

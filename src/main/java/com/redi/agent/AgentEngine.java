@@ -90,6 +90,7 @@ public final class AgentEngine {
         m.put("read_guidebook", "读模组手册");
         m.put("read_file", "读本机文件");
         m.put("list_files", "列目录");
+        m.put("image_matrix", "图片转像素矩阵");
         m.put("web_search", "联网搜索");
         m.put("web_read", "读网页");
         return m;

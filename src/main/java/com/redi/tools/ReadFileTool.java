@@ -12,7 +12,7 @@ import java.nio.file.Path;
 /**
  * read_file:读本机文件(玩家授权的本机文件访问;只读,不写)。
  * 支持绝对路径(E:\dir\a.md / /home/u/a.txt)与相对路径(相对游戏工作目录)。
- * 文本按 UTF-8 读;二进制扩展名给出提示而非乱码。截断到 6000 字符。
+ * 文本按 UTF-8 读(6000 字符截断);图片(png/jpg/bmp/gif)自动转成像素矩阵供解读;其它二进制给出提示。
  */
 public final class ReadFileTool implements AgentTool {
 
@@ -71,10 +71,13 @@ public final class ReadFileTool implements AgentTool {
                 return "文件不存在或不可读: " + p + "(检查路径;列目录用 list_files)";
             }
             String name = p.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
-            if (name.endsWith(".zip") || name.endsWith(".jar") || name.endsWith(".png") || name.endsWith(".jpg")
-                    || name.endsWith(".jpeg") || name.endsWith(".gif") || name.endsWith(".exe") || name.endsWith(".dll")
+            if (name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")
+                    || name.endsWith(".bmp") || name.endsWith(".gif")) {
+                return ImageMatrixTool.matrix(p, 24); // 图片 → 像素矩阵供模型解读
+            }
+            if (name.endsWith(".zip") || name.endsWith(".jar") || name.endsWith(".exe") || name.endsWith(".dll")
                     || name.endsWith(".bin") || name.endsWith(".mp3") || name.endsWith(".mp4")) {
-                return "二进制文件不支持读取: " + name + "(" + Files.size(p) + " 字节)。只支持文本类文件。";
+                return "二进制文件不支持读取: " + name + "(" + Files.size(p) + " 字节)。只支持文本与图片。";
             }
             String content = Files.readString(p, StandardCharsets.UTF_8);
             if (content.isEmpty()) {

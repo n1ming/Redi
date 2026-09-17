@@ -881,8 +881,13 @@ final class ChatView {
             int cy = drawY + 1 + (i / perRow) * 18;
             drawIconSlot(g, itemOrNull(e.id()), cx, cy, COLOR_SLOT_EDGE);
             if (e.count() > 1) {
+                // 数量角标:槽内右下角,深色衬底保证可读(JEI 风格)
                 String n = "x" + e.count();
-                g.drawString(font, n, cx + 17 - font.width(n), cy + 9, 0xFFFFFFCC, false);
+                int w = font.width(n);
+                int tx = cx + CELL - w - 1;
+                int ty = cy + CELL - 9;
+                g.fill(tx - 1, ty - 1, cx + CELL, ty + 8, 0xB3000000);
+                g.drawString(font, n, tx, ty, 0xFFFFFFFF, false);
             }
         }
     }

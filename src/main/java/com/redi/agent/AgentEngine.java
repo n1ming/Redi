@@ -31,6 +31,8 @@ import java.util.concurrent.Executors;
  * 自动发“继续”接写。每个工具执行期间会在 ChatModel 上更新活动描述供手机界面展示。</p>
  */
 public final class AgentEngine {
+
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger("redi");
     private static final AgentEngine INSTANCE = new AgentEngine();
 
     /** 同一“工具+参数”签名连续出现到第几次时跳过真正执行。 */
@@ -539,6 +541,105 @@ public final class AgentEngine {
         }
     }
 
+    // ---- 上下文整形(借鉴 deepseek-harness 的 compaction 思路:剪枝优先,保结论剪过程)----
+    /** 软预算:请求体超过此字符数才启用剪枝(平时零干预,历史全量)。 */
+    private static final int SHAPE_SOFT_CHARS = 120_000;
+    /** 硬预算:剪枝后仍超,从最老开始丢整轮(绝不越过最近一条用户轮)。 */
+    private static final int SHAPE_HARD_CHARS = 300_000;
+    /** 最近 N 轮永远完整(过程细节保留)。 */
+    private static final int SHAPE_KEEP_RECENT = 6;
+
+    /**
+     * 上下文整形(不改 rounds,返回发送副本):
+     * ①超出软预算时,把「较早轮次」的 tool 结果替换为一行存根(用户提问/最终回答/最近 6 轮永远完整)
+     * ②仍超硬预算时,从最老开始丢整轮(不越过最近用户轮)。
+     * 工具结果是可再生的过程数据;问答结论永不丢失——这正是 harness 剪枝优先、摘要兜底的思路。
+     */
+    private List<LlmMessage> shapeForRequest(List<List<LlmMessage>> snap) {
+        List<List<LlmMessage>> rounds = new ArrayList<>();
+        for (List<LlmMessage> r : snap) rounds.add(new ArrayList<>(r));
+        long total = 0;
+        for (List<LlmMessage> r : rounds) {
+            for (LlmMessage m : r) total += m.content() == null ? 0 : m.content().length();
+        }
+        if (total <= SHAPE_SOFT_CHARS) {
+            return assemble(rounds); // 平时零干预
+        }
+        // 找最近一条用户轮(整形绝不越过它)
+        int userAnchor = -1;
+        for (int i = rounds.size() - 1; i >= 0; i--) {
+            if (!rounds.get(i).isEmpty() && rounds.get(i).get(0).role().equals("user")) {
+                userAnchor = i;
+                break;
+            }
+        }
+        int keepFrom = Math.max(0, rounds.size() - SHAPE_KEEP_RECENT);
+        long pruned = 0;
+        int prunedRounds = 0;
+        for (int i = 0; i < keepFrom && i < rounds.size(); i++) {
+            List<LlmMessage> r = rounds.get(i);
+            if (r.isEmpty()) continue;
+            String toolNames = null;
+            for (LlmMessage m : r) {
+                if (m.toolCalls() != null && !m.toolCalls().isEmpty()) {
+                    StringBuilder names = new StringBuilder();
+                    for (ToolCall tc : m.toolCalls()) {
+                        if (names.length() > 0) names.append('/');
+                        names.append(tc.name());
+                    }
+                    toolNames = names.toString();
+                }
+                if ("tool".equals(m.role()) && m.content() != null && m.content().length() > 200) {
+                    String stub = "[已归档" + (toolNames != null ? ":" + toolNames : "")
+                            + "](原 " + m.content().length() + " 字符,过程数据已消费。"
+                            + "开头摘要: " + m.content().substring(0, Math.min(60, m.content().length())) + "…)";
+                    pruned += m.content().length() - stub.length();
+                    rounds.get(i).set(r.indexOf(m), LlmMessage.tool(m.toolCallId(), stub));
+                    prunedRounds++;
+                }
+            }
+        }
+        // 硬预算兜底:从最老丢整轮(不越过用户锚)
+        total = 0;
+        for (List<LlmMessage> r : rounds) {
+            for (LlmMessage m : r) total += m.content() == null ? 0 : m.content().length();
+        }
+        int dropTo = 0;
+        while (total > SHAPE_HARD_CHARS && dropTo < rounds.size() - 1
+                && (userAnchor < 0 || dropTo < userAnchor)) {
+            for (LlmMessage m : rounds.get(dropTo)) {
+                total -= m.content() == null ? 0 : m.content().length();
+            }
+            dropTo++;
+        }
+        if (dropTo > 0) {
+            rounds.subList(0, dropTo).clear();
+        }
+        if (prunedRounds > 0 || dropTo > 0) {
+            LOG.info("[redi] 上下文整形: 归档 {} 轮工具细节(省 {} 字符), 移除最老 {} 轮",
+                    prunedRounds, pruned, dropTo);
+        }
+        return assemble(rounds);
+    }
+
+    /** system + 轮次序列(保证 user 开头)。 */
+    private List<LlmMessage> assemble(List<List<LlmMessage>> rounds) {
+        List<LlmMessage> out = new ArrayList<>();
+        out.add(LlmMessage.system(buildSystemPrompt()));
+        boolean empty = true;
+        for (List<LlmMessage> r : rounds) {
+            if (empty && !r.isEmpty() && !r.get(0).role().equals("user")) {
+                out.add(LlmMessage.user(currentTask == null || currentTask.isBlank() ? "(继续)" : currentTask));
+            }
+            empty = false;
+            out.addAll(r);
+        }
+        if (empty) {
+            out.add(LlmMessage.user(currentTask == null || currentTask.isBlank() ? "(继续)" : currentTask));
+        }
+        return out;
+    }
+
     /**
      * 组装本次请求消息:system(每次重建)+ 历史全部轮次(玩家要求:本地不设任何上下文上限,
      * 历史全量发送;只有当服务商因超出其上下文窗口返回 400 时,才由 request() 的
@@ -546,25 +647,12 @@ public final class AgentEngine {
      * 双保险保证 GLM 1214 的硬性要求——messages 以 user 开头。
      */
     private List<LlmMessage> buildRequest() {
-        List<LlmMessage> out = new ArrayList<>();
-        out.add(LlmMessage.system(buildSystemPrompt()));
+        List<List<LlmMessage>> snap;
         synchronized (rounds) {
-            boolean empty = true;
-            for (List<LlmMessage> r : rounds) {
-                if (empty && !r.isEmpty() && !r.get(0).role().equals("user")) {
-                    // 兜底:历史不以 user 开头时补一条,否则 GLM 1214 必拒
-                    out.add(LlmMessage.user(currentTask == null || currentTask.isBlank()
-                            ? "(继续)" : currentTask));
-                }
-                empty = false;
-                out.addAll(r);
-            }
-            if (empty) {
-                out.add(LlmMessage.user(currentTask == null || currentTask.isBlank()
-                        ? "(继续)" : currentTask));
-            }
+            snap = new ArrayList<>();
+            for (List<LlmMessage> r : rounds) snap.add(new ArrayList<>(r));
         }
-        return out;
+        return shapeForRequest(snap);
     }
 
     /** 系统提示:身份 + 按取证优先级分层的工具清单(由注册表自动生成,新插件自动进层)+ 硬性规则。 */

@@ -714,6 +714,7 @@ public final class AgentEngine {
           .append("- [items] 物品横排图标(材料清单/掉落/套装成员):[items]minecraft:iron_ingot*3|minecraft:chest|minecraft:stick*2[/items],数量用 *n,竖线分隔,可单行也可换行。\n")
           .append("- [flow] 流程/转化链(图标+箭头):[flow]minecraft:raw_iron >> minecraft:iron_ingot >> minecraft:iron_sword[/flow],用 >> 分隔。\n")
           .append("- [ring] 环形布局(祭坛仪式/环绕结构,中心+环绕):[ring]goety:dark_altar | goety:pedestal*8 | goety:cursed_cage[/ring],首项居中,其余环绕一圈;常配合文字说明仪式步骤一起用。\n")
+          .append("9. 像素画/马赛克建造任务:先用 image_matrix(mode=build,size 按墙的大小选 16~48)拿到施工单,然后逐行用 /fill 执行(如 /fill x1 y z1 x2 y z2 minecraft:white_concrete 需按游程分段),颜色严格按施工单映射,不要自行换色;\n")
           .append("图形单独成段,与文字说明穿插;文字负责讲清步骤与条件,图形负责展示物品。[grid] 配方行各自独占一行,不要把网格写成一行。\n9. 获取方式必须匹配真实途径:工作台配方用 [grid];材料/流程/仪式按第 8 条选图形;一切非工作台获取(召唤、献祭、仪式、酿造、转化、战利品等)先用 read_guidebook 查手册,按手册原文转述(材料用 [items]、祭坛布局用 [ring]、步骤用 [flow] 配文字),绝不要硬塞进工作台网格;注册表里查不到合成配方不代表没有获取途径。\n\n")
           .append("10. 不要连续重复调用相同工具+相同参数;若两次调用没有获得新信息,直接根据已有信息回答。\n")
           .append("11. 严格遵守取证优先级分层(知识库→内存→本地文件→联网);指令/物品常识先 kb_search,精确语法用 command_usage,不要凭记忆猜测指令语法。联网只允许 GET 读取,严禁向任何网页提交账号、密钥、聊天记录或本机文件内容。\n")

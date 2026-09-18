@@ -73,7 +73,7 @@ public final class ReadFileTool implements AgentTool {
             String name = p.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
             if (name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")
                     || name.endsWith(".bmp") || name.endsWith(".gif")) {
-                return ImageMatrixTool.matrix(p, 24); // 图片 → 像素矩阵供模型解读
+                return ImageMatrixTool.matrix(p, 24, "both"); // 图片 → 像素矩阵供模型解读
             }
             if (name.endsWith(".zip") || name.endsWith(".jar") || name.endsWith(".exe") || name.endsWith(".dll")
                     || name.endsWith(".bin") || name.endsWith(".mp3") || name.endsWith(".mp4")) {

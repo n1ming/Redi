@@ -56,9 +56,19 @@ public final class ImageMatrixTool implements AgentTool {
         JsonObject size = new JsonObject();
         size.addProperty("type", "integer");
         size.addProperty("description", "最长边缩放像素数,默认 32,范围 8~64;MC 素材建议 16/32");
+        JsonObject mode = new JsonObject();
+        mode.addProperty("type", "string");
+        JsonArray modes = new JsonArray();
+        modes.add("matrix");
+        modes.add("build");
+        modes.add("both");
+        mode.add("enum", modes);
+        mode.addProperty("description", "matrix=仅像素矩阵;build=调色板方块映射+逐行施工单(像素画建造任务用这个);"
+                + "both=矩阵+施工单(默认)");
         JsonObject props = new JsonObject();
         props.add("path", path);
         props.add("size", size);
+        props.add("mode", mode);
         JsonObject schema = new JsonObject();
         schema.addProperty("type", "object");
         schema.add("properties", props);
@@ -81,15 +91,16 @@ public final class ImageMatrixTool implements AgentTool {
             }
         } catch (Exception ignored) {
         }
+        String mode = ToolRegistry.argStr(args, "mode");
         Path p = Path.of(raw.trim());
         if (!p.isAbsolute()) {
             p = Path.of("").toAbsolutePath().resolve(p);
         }
-        return matrix(p, size);
+        return matrix(p, size, mode == null || mode.isBlank() ? "both" : mode.trim().toLowerCase(Locale.ROOT));
     }
 
     /** 生成像素矩阵文本(@图片导入共用)。 */
-    static String matrix(Path p, int maxSide) {
+    static String matrix(Path p, int maxSide, String mode) {
         try {
             if (!Files.isRegularFile(p)) {
                 return "图片不存在: " + p;
@@ -207,19 +218,28 @@ public final class ImageMatrixTool implements AgentTool {
             sb.append("图片 ").append(p.getFileName()).append(" (原 ").append(ow).append('x').append(oh)
                     .append(" → 矩阵 ").append(w).append('x').append(h)
                     .append(", 自适应调色板 ").append(palette.size()).append(" 色;空格=透明):\n");
-            sb.append("调色板(索引=近似色名 RGB, 占比):\n");
+            boolean wantBuild = mode.equals("build") || mode.equals("both");
+            boolean wantMatrix = mode.equals("matrix") || mode.equals("both");
+            sb.append("调色板(索引=近似色名 RGB→参考方块, 占比):\n");
             for (int i : order) {
                 if (counts[i] == 0) continue;
                 int[] c = palette.get(i);
+                String blk = SYMBOLS[i] == ' ' ? "air" : nearestBlock(c[0], c[1], c[2]);
                 sb.append(' ').append(SYMBOLS[i]).append('=').append(approxName(c[0], c[1], c[2]))
-                        .append(String.format(Locale.ROOT, "(#%02X%02X%02X, %s)", c[0], c[1], c[2],
-                                pct(counts[i], totalOpaque))).append('\n');
+                        .append(String.format(Locale.ROOT, "(#%02X%02X%02X)", c[0], c[1], c[2]))
+                        .append("→").append(blk)
+                        .append(", ").append(pct(counts[i], totalOpaque)).append('\n');
             }
-            sb.append("矩阵(每字符一像素,左→右,上→下;空格=透明):\n");
-            for (int y = 0; y < h; y++) {
-                sb.append(grid[y]).append('\n');
+            if (wantBuild) {
+                sb.append('\n').append(buildPlan(grid, palette, SYMBOLS));
             }
-            return ToolRegistry.trunc(sb.toString(), 6000);
+            if (wantMatrix) {
+                sb.append("\n矩阵(每字符一像素,左→右,上→下;空格=透明):\n");
+                for (int y = 0; y < h; y++) {
+                    sb.append(grid[y]).append('\n');
+                }
+            }
+            return ToolRegistry.trunc(sb.toString(), 9000);
         } catch (Throwable t) {
             return "生成像素矩阵失败: " + t;
         }
@@ -253,6 +273,111 @@ public final class ImageMatrixTool implements AgentTool {
             base = r >= b * 3 / 5 ? "紫" : (g >= b * 2 / 5 ? "天蓝" : "蓝");
         }
         return (mx < 105 ? "深" : mx < 185 ? "" : "亮") + base;
+    }
+
+    // ---------------------------------------------------------------- MC 方块映射
+
+    /** 建造用的 MC 方块调色板(名称 + RGB),覆盖常见色域(混凝土系为主)。 */
+    private static final Object[][] MC_BLOCKS = {
+            {"white_concrete", 207, 213, 214},
+            {"light_gray_concrete", 125, 125, 115},
+            {"gray_concrete", 54, 57, 61},
+            {"black_concrete", 8, 10, 15},
+            {"brown_concrete", 96, 59, 31},
+            {"red_concrete", 142, 33, 33},
+            {"orange_concrete", 224, 97, 0},
+            {"yellow_concrete", 240, 175, 21},
+            {"lime_concrete", 94, 168, 24},
+            {"green_concrete", 84, 109, 27},
+            {"cyan_concrete", 21, 119, 136},
+            {"light_blue_concrete", 125, 187, 221},
+            {"blue_concrete", 44, 46, 143},
+            {"purple_concrete", 100, 31, 156},
+            {"magenta_concrete", 191, 70, 165},
+            {"pink_concrete", 237, 141, 172},
+            {"gold_block", 246, 208, 61},
+            {"iron_block", 220, 220, 220},
+            {"netherite_block", 68, 58, 64},
+            {"terracotta", 152, 94, 67},
+            {"white_terracotta", 209, 178, 161},
+            {"brown_terracotta", 77, 51, 35},
+            {"yellow_terracotta", 186, 133, 35},
+            {"red_sand", 190, 102, 33},
+            {"sand", 219, 207, 163},
+            {"oak_planks", 162, 130, 78},
+            {"spruce_planks", 114, 84, 48},
+            {"coal_block", 11, 11, 11},
+            {"lapis_block", 31, 60, 126},
+            {"emerald_block", 42, 203, 96},
+    };
+
+    /** 调色板 RGB → 最近的 MC 方块名。 */
+    private static String nearestBlock(int r, int g, int b) {
+        String best = "white_concrete";
+        double bestD = Double.MAX_VALUE;
+        for (Object[] blk : MC_BLOCKS) {
+            double dr = r - (int) blk[1], dg = g - (int) blk[2], db = b - (int) blk[3];
+            double d = 0.30 * dr * dr + 0.59 * dg * dg + 0.11 * db * db;
+            if (d < bestD) {
+                bestD = d;
+                best = (String) blk[0];
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 像素画施工单:调色板色 → MC 方块映射 + 每行 RLE 游程。
+     * 模型按行执行 /fill 或逐段放置,零色彩判断、零转写错误。
+     */
+    private static String buildPlan(char[][] grid, List<int[]> palette, char[] symbols) {
+        // 先把每格解析为方块名(不同调色板索引可能映射到同一方块,按方块名合并游程)
+        String[][] names = new String[grid.length][];
+        for (int y = 0; y < grid.length; y++) {
+            names[y] = new String[grid[y].length];
+            for (int x = 0; x < grid[y].length; x++) {
+                names[y][x] = blockNameFor(symbols, palette, grid[y][x]);
+            }
+        }
+        StringBuilder sb = new StringBuilder("施工单(每行从左到右的游程;建议逐行 /fill 或分段放置):\n");
+        for (int y = 0; y < names.length; y++) {
+            sb.append(String.format(Locale.ROOT, "第%02d行: ", y + 1));
+            String prev = null;
+            int run = 0;
+            boolean first = true;
+            for (int x = 0; x < names[y].length; x++) {
+                String n = names[y][x];
+                if (prev == null) {
+                    prev = n;
+                    run = 1;
+                } else if (n.equals(prev)) {
+                    run++;
+                } else {
+                    sb.append(first ? "" : ", ").append(prev);
+                    if (run > 1) sb.append('×').append(run);
+                    first = false;
+                    prev = n;
+                    run = 1;
+                }
+            }
+            if (prev != null) {
+                sb.append(first ? "" : ", ").append(prev);
+                if (run > 1) sb.append('×').append(run);
+            }
+            sb.append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static String blockNameFor(char[] symbols, List<int[]> palette, char sym) {
+        for (int i = 0; i < symbols.length; i++) {
+            if (symbols[i] == sym && i < palette.size()) {
+                int[] c = palette.get(i);
+                // 透明(空格符)→ 空气
+                return sym == ' ' ? "air" : nearestBlock(c[0], c[1], c[2]);
+            }
+        }
+        return "air";
     }
 
     // ---------------------------------------------------------------- 加权中位切分

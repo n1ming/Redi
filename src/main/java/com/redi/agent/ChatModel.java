@@ -26,6 +26,20 @@ public final class ChatModel {
     private volatile boolean busy = false;
     /** 引擎执行中的活动描述(如“调用 inspect_item…”),busy 带展示;空闲时为空串。 */
     private volatile String activity = "";
+    /** 任务开始时刻(0=无任务);UI 据此显示任务总耗时(而非某一步的耗时)。 */
+    private volatile long taskStartMs = 0L;
+
+    public void setTaskStart(long ts) {
+        this.taskStartMs = ts;
+    }
+
+    public void clearTaskStart() {
+        this.taskStartMs = 0L;
+    }
+
+    public long taskStartMs() {
+        return taskStartMs;
+    }
 
     // ---- 实时思考块:任务进行中就出现在聊天里,随工具调用逐条增长 ----
     private long liveThinkTs = -1;

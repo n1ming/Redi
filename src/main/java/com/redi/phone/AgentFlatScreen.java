@@ -103,6 +103,8 @@ public final class AgentFlatScreen extends Screen {
     private boolean inHistory = false;
     /** 左列(工作台+熔炉)收起开关:收起后只留一个展开按钮。 */
     private boolean leftCollapsed = false;
+    /** 左列展开/收起切换按钮(MC 原版样式,同一按钮文字互斥)。 */
+    private net.minecraft.client.gui.components.Button collapseBtn;
 
     /** 原版移动键(每帧透传 setDown 用),init() 时从 options 收集。 */
     private KeyMapping[] movementKeys;
@@ -141,6 +143,19 @@ public final class AgentFlatScreen extends Screen {
             com.redi.RediMod.LOGGER.info("[redi] 平铺 init → openVirtualCraft");
             ModNetworking.openVirtualCraft(); // 主线程(屏幕回调)发包;绑定同一持久容器
         }
+        // 左列展开/收起:MC 原版按钮,同一位置文字互斥(窗口 resize 时 init 重跑,先清旧的)
+        if (collapseBtn != null) {
+            removeWidget(collapseBtn);
+        }
+        collapseBtn = net.minecraft.client.gui.components.Button.builder(
+                        net.minecraft.network.chat.Component.literal(leftCollapsed ? "展开" : "收起"),
+                        b -> {
+                            leftCollapsed = !leftCollapsed;
+                            com.redi.RediMod.LOGGER.info("[redi] 左列切换 → {}", leftCollapsed ? "收起" : "展开");
+                        })
+                .bounds(WB_X, WB_Y - 16, 44, 14)
+                .build();
+        addRenderableWidget(collapseBtn);
         // 重进游戏:本次启动首次打开助手且当前没有任何聊天记录时,
         // 自动载入最近一次保存的会话(= 玩家上次退出时的会话,含模型上下文)
         if (!autoRestoredLaunch) {
@@ -193,11 +208,12 @@ public final class AgentFlatScreen extends Screen {
         layout();
 
         // 绘制顺序 = 叠放次序:左侧工作台、熔炉,中间手机机身(带聊天 App),手持堆最上
-        // 左列可收起:收起后只显示「展开工具」小按钮
+        // 左列可收起:切换按钮是 MC 原版 Button(在 init 注册,此处只同步文字)
+        if (collapseBtn != null) {
+            collapseBtn.setMessage(net.minecraft.network.chat.Component.literal(leftCollapsed ? "展开" : "收起"));
+        }
         if (leftCollapsed) {
-            guiGraphics.fill(WB_X, WB_Y, WB_X + 66, WB_Y + 14, 0xAA101420);
-            guiGraphics.renderOutline(WB_X, WB_Y, 66, 14, PANEL_EDGE);
-            guiGraphics.drawString(font, "▸ 展开工具", WB_X + 4, WB_Y + 3, 0xFFADADAD, false);
+            // 收起:不画面板,按钮就是全部
         } else {
             // 左上工作台(原版面板,自带 0xFFC6C6C6 底板)
             renderVanillaPanel(guiGraphics, WB_X, WB_Y, PANEL_W, PANEL_H, mouseX, mouseY, partialTick,
@@ -207,10 +223,6 @@ public final class AgentFlatScreen extends Screen {
                 renderVanillaPanel(guiGraphics, WB_X, fuY, PANEL_W, fuH, mouseX, mouseY, partialTick,
                         furnace::render);
             }
-            // 收起按钮(工作台面板右上角,盖在面板上)
-            guiGraphics.fill(WB_X + PANEL_W - 34, WB_Y - 1, WB_X + PANEL_W - 2, WB_Y + 11, 0xAA101420);
-            guiGraphics.renderOutline(WB_X + PANEL_W - 34, WB_Y - 1, 32, 12, PANEL_EDGE);
-            guiGraphics.drawString(font, "◂ 收起", WB_X + PANEL_W - 32, WB_Y + 1, 0xFFADADAD, false);
         }
         // 手机机身:直接复用 mcphone 的 PhoneChassis(带玩家已装皮肤/状态栏/导航条),
         // 与手机全屏模式观感一致。几何同 PhoneScreen.render(反编译 330-331 行):
@@ -223,6 +235,10 @@ public final class AgentFlatScreen extends Screen {
                         : inSettings ? settings::render : chat::render);
         com.november.mcphone.core.client.PhoneChassis.drawNavBar(guiGraphics, font, bodyX, bodyY, mouseX, mouseY);
 
+        // 左列展开/收起按钮(MC 原版样式,手动绘制:自定义 render 不走 super.render)
+        if (collapseBtn != null) {
+            collapseBtn.render(guiGraphics, mouseX, mouseY, partialTick);
+        }
         // 手持堆:最后画,保证在所有面板之上;渲染在鼠标位置(原版 cursor item 语义)
         renderCarried(guiGraphics, mouseX, mouseY);
     }
@@ -321,18 +337,6 @@ public final class AgentFlatScreen extends Screen {
             }
             return true;
         }
-        // 左列收起开关
-        if (Widgets.hit(mouseX, mouseY, WB_X + PANEL_W - 34, WB_Y - 1, 32, 12)) {
-            leftCollapsed = !leftCollapsed;
-            com.redi.RediMod.LOGGER.info("[redi] 左列收起切换 → {}", leftCollapsed ? "收起" : "展开");
-            return true;
-        }
-        // 收起状态下的「▸ 展开工具」按钮
-        if (leftCollapsed && Widgets.hit(mouseX, mouseY, WB_X, WB_Y, 66, 14)) {
-            leftCollapsed = false;
-            com.redi.RediMod.LOGGER.info("[redi] 左列展开");
-            return true;
-        }
         if (inChat(mouseX, mouseY)) {
             if (inHistory) {
                 return history.mouseClicked(mouseX, mouseY, button);
@@ -350,7 +354,8 @@ public final class AgentFlatScreen extends Screen {
         if (button == 0 || button == 1) {
             return VanillaPanels.putBackCarried(button);
         }
-        return false;
+        // 其余区域交给 widget(左列展开/收起按钮在此命中)
+        return super.mouseClicked(mouseX, mouseY, button);
     }
 
     /**

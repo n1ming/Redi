@@ -306,8 +306,14 @@ final class ChatView {
         int actY = top - 12;
         String act = ChatModel.get().activity();
         String busyText = act != null && !act.isBlank()
-                ? act.trim().replaceAll("\\s+", " ")
+                ? act.trim().replaceAll("\s+", " ")
                 : Component.translatable("redi.chat.busy").getString();
+        // 任务总耗时(从任务开始计,不是某一步的耗时),拼在活动文案后
+        long startMs = ChatModel.get().taskStartMs();
+        if (startMs > 0) {
+            long sec = (System.currentTimeMillis() - startMs) / 1000;
+            busyText = busyText + " " + sec + "s";
+        }
         drawThinkingAnim(canvas, x + 3, actY, 13, 10); // 缩小版转台
         drawShimmerText(canvas, busyText, x + 19, actY + 1, x + w - (x + 19) - 16);
         g.drawString(font, thinkPanelExpanded ? "▴" : "▾", x + w - 10, actY,
@@ -565,12 +571,12 @@ final class ChatView {
                     p++;
                     continue;
                 }
-                String src = (user && p == 0) ? "> " + paragraphs[p] : paragraphs[p];
+                String src = paragraphs[p]; // 用户消息同样左对齐正向显示(无前缀)
                 List<FormattedCharSequence> wrapped = src.isEmpty()
                         ? List.of(FormattedCharSequence.EMPTY)
                         : canvas.font().split(Component.literal(src), WRAP_W);
                 for (FormattedCharSequence l : wrapped) {
-                    block.add(new TextLine(l, color, user, 0));
+                    block.add(new TextLine(l, color, false, 0)); // 统一左对齐
                 }
                 p++;
             }

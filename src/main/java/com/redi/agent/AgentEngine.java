@@ -201,6 +201,7 @@ public final class AgentEngine {
             // 新任务清空“重复调用”计数
             sigCounts.clear();
             currentTask = userText;
+            chat.setTaskStart(System.currentTimeMillis());
             synchronized (rounds) {
                 rounds.addLast(List.of(LlmMessage.user(userText)));
             }
@@ -289,6 +290,7 @@ public final class AgentEngine {
             chat.setActivity("");
             chat.endThink();
             chat.setBusy(false);
+            chat.clearTaskStart();
             // 任务结束事件:存档等后续逻辑由插件监听执行(会话持久化插件)
             com.redi.plugin.AgentContext.SHARED.emit("task.finished", userText);
         }
@@ -303,22 +305,7 @@ public final class AgentEngine {
         try {
             try {
                 // 流式:思考增量实时进思考面板;等待期间显示已用时
-                java.util.concurrent.atomic.AtomicInteger elapsed = new java.util.concurrent.atomic.AtomicInteger();
-                var ticker = new java.util.concurrent.atomic.AtomicBoolean(true);
-                Thread tickThread = new Thread(() -> {
-                    while (ticker.get()) {
-                        try {
-                            Thread.sleep(1000);
-                        } catch (InterruptedException interrupted) {
-                            return;
-                        }
-                        if (ticker.get()) {
-                            chat.setActivity("思考中…(已等待 " + elapsed.incrementAndGet() + "s,上下文大时较慢)");
-                        }
-                    }
-                }, "redi-wait-tick");
-                tickThread.setDaemon(true);
-                tickThread.start();
+                // 总耗时由 ChatModel.taskStartMs 驱动(UI 每帧计算),不再用线程覆盖活动文案
                 try {
                     return client.chat(buildRequest(), ToolRegistry.schemas(), new LlmClient.StreamListener() {
                         @Override
@@ -327,8 +314,6 @@ public final class AgentEngine {
                         }
                     });
                 } finally {
-                    ticker.set(false);
-                    tickThread.interrupt();
                     chat.flushStream(); // 流式思考缓冲定稿
                 }
             } catch (Exception first) {

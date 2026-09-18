@@ -153,7 +153,7 @@ public final class AgentFlatScreen extends Screen {
                             leftCollapsed = !leftCollapsed;
                             com.redi.RediMod.LOGGER.info("[redi] 左列切换 → {}", leftCollapsed ? "收起" : "展开");
                         })
-                .bounds(WB_X, WB_Y - 16, 44, 14)
+                .bounds(WB_X, this.height - 22, 44, 14) // 屏幕左下角:无 HUD/面板遮挡,收起展开都固定在此
                 .build();
         addRenderableWidget(collapseBtn);
         // 重进游戏:本次启动首次打开助手且当前没有任何聊天记录时,
@@ -325,6 +325,10 @@ public final class AgentFlatScreen extends Screen {
      */
     @Override
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        // 左列展开/收起按钮优先(原版 widget 分发,放最前防被区域判断吞掉)
+        if (collapseBtn != null && collapseBtn.isMouseOver(mouseX, mouseY)) {
+            return collapseBtn.mouseClicked(mouseX, mouseY, button);
+        }
         // 手机导航栏(◁ 返回 / ○ 主屏 / □ 多任务):◁ 与 ○ = 收起平铺回桌面,□ 无动作。
         // 注意 hitTestNavBar 在导航区外返回 NavButton.NONE(非 null!),必须显式排除,
         // 否则全屏所有点击都会被这里吞掉。

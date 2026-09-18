@@ -34,7 +34,7 @@ import net.minecraft.client.player.LocalPlayer;
  */
 final class WorkbenchView {
     static final int PANEL_W = 176;
-    static final int PANEL_H = 142;
+    static final int PANEL_H = 166; // 原版全高:背包三行 + 快捷栏行
 
     // 槽位 16x16 内容区坐标(与类注释对照表一一对应)
     private static final int RESULT_X = 124;
@@ -100,8 +100,8 @@ final class WorkbenchView {
             VanillaPanels.drawItem(g, font, menu.getSlot(0).getItem(), x + RESULT_X, y + RESULT_Y);
         }
 
-        // 玩家背包主区三行(槽 10..36)+ 快捷栏(槽 37..45)
-        VanillaPanels.drawPlayerInventory(g, font, menu, x, y, true, false, hover); // 需求:不画快捷栏
+        // 玩家背包主区三行(槽 10..36)+ 快捷栏(槽 37..45):完整背包可拖动
+        VanillaPanels.drawPlayerInventory(g, font, menu, x, y, true, true, hover);
     }
 
     /**
@@ -118,7 +118,7 @@ final class WorkbenchView {
                 return 1 + i;
             }
         }
-        return VanillaPanels.playerSlotAt(lx, ly, true, false); // 需求:不画快捷栏
+        return VanillaPanels.playerSlotAt(lx, ly, true, true); // 含快捷栏:画的可点、点的可画
     }
 
     boolean mouseClicked(double mx, double my, int button) {

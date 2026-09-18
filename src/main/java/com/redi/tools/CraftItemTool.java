@@ -48,12 +48,11 @@ public final class CraftItemTool implements AgentTool {
     public String description() {
         return "自动合成物品(摆料):参数 item 填要合成的产物注册名(如 minecraft:chest)。"
                 + "工具会自动匹配已知配方、检查背包里的材料,把材料摆上服务端内置虚拟工作台:"
-                + "不需要放置真实工作台,2x2 与 3x3 配方都支持。结果槽出现产物后工具即停止,"
-                + "不会自动收取——产物由玩家在手机 AI 助手 App 的「⚒ 工作台」页点击产物槽收取,"
-                + "收取时服务端才真实扣料结算并入包。材料不足、无法打开虚拟工作台或配方未命中时会直接返回原因。"
+                + "不需要放置真实工作台,2x2 与 3x3 配方都支持。"
+                + "合成完成后产物会【自动收取放进玩家背包】,材料真实消耗,无需玩家手动收。"
+                + "材料不足、无法打开虚拟工作台或配方未命中时会直接返回原因。"
                 + "摆料过程会实时显示在手机左侧的虚拟工作台面板上。"
-                + "使用时机:玩家明确要求“帮我合成/做 X 个 Y”时;要合成多个,请提示玩家先收取产物,"
-                + "然后再次调用本工具(每次调用摆放一轮材料)。";
+                + "使用时机:玩家明确要求“帮我合成/做 Y”时;要合成多个,多次调用本工具即可(每次合成一份并自动入包)。";
     }
 
     @Override
@@ -208,8 +207,39 @@ public final class CraftItemTool implements AgentTool {
                 if (!ContainerAutomation.matches(out, List.of(resultItem))) {
                     notes.append("(注意:实际产出 ").append(ContainerAutomation.idOf(out)).append(")");
                 }
-                CraftHud.setResult(out.copy()); // 保留 HUD 展示:产物就绪(HudOverlay 左面板接管时为兜底)
+                CraftHud.setResult(out.copy()); // HUD 展示保留
                 return ContainerAutomation.StepResult.ok();
+            }
+        });
+
+        // ---- 收取产物:QUICK_MOVE 点击结果槽,服务端结算扣料并把产物放进玩家背包 ----
+        final ItemStack[] collected = new ItemStack[1];
+        steps.add(new ContainerAutomation.Step() {
+            @Override
+            public ContainerAutomation.StepResult run(int attempt) {
+                LocalPlayer p = fmc.player;
+                if (p == null) return ContainerAutomation.gone();
+                AbstractContainerMenu menu = menuRef[0];
+                if (menuClosed(p, menu)) {
+                    return collected[0] != null && !collected[0].isEmpty()
+                            ? ContainerAutomation.StepResult.ok() // 已收过,菜单随后关闭无妨
+                            : ContainerAutomation.StepResult.fail("虚拟工作台已被关闭,产物未收取。");
+                }
+                ItemStack out = menu.getSlot(0).getItem();
+                if (out.isEmpty()) {
+                    if (attempt == 0) {
+                        return ContainerAutomation.StepResult.waitMore("等待服务器结算产物…");
+                    }
+                    return collected[0] != null && !collected[0].isEmpty()
+                            ? ContainerAutomation.StepResult.ok() // 收取已生效(槽已清空)
+                            : ContainerAutomation.StepResult.fail("结果槽为空,收取未生效。");
+                }
+                // 首次见到产物:点一次 QUICK_MOVE 收取;下轮复查槽清空即成功
+                ContainerAutomation.click(fmc, menu, 0, 0, net.minecraft.world.inventory.ClickType.QUICK_MOVE);
+                if (collected[0] == null || collected[0].isEmpty()) {
+                    collected[0] = out.copy(); // 记录本次收取的产物(供总结)
+                }
+                return ContainerAutomation.StepResult.waitMore("收取产物…");
             }
         });
 
@@ -220,9 +250,16 @@ public final class CraftItemTool implements AgentTool {
         if (report.failed()) {
             return "合成失败:" + report.failReason() + "(界面已关闭,未消耗的材料已退回背包。)";
         }
-        StringBuilder sb = new StringBuilder("材料已摆上虚拟工作台,产物已就绪;打开 App 的 ⚒ 工作台页,点产物槽收取。");
+        StringBuilder sb = new StringBuilder("合成完成:");
+        if (collected[0] != null && !collected[0].isEmpty()) {
+            sb.append(collected[0].getCount()).append(" × ")
+                    .append(collected[0].getHoverName().getString())
+                    .append(" 已放入背包。");
+        } else {
+            sb.append("产物已收取。");
+        }
         if (!notes.isEmpty()) sb.append(notes);
-        sb.append("(配方:").append(plan.recipeId()).append(",收取时服务端才真实扣料结算。)");
+        sb.append("(配方: ").append(plan.recipeId()).append(";材料已消耗。)");
         return com.redi.agent.ToolRegistry.trunc(sb.toString(), 6000);
     }
 

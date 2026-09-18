@@ -32,7 +32,9 @@ public final class ImageMatrixTool implements AgentTool {
     private static final char[] SYMBOLS = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
             'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
             'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'm', 'n', 'o',
-            'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '!', '#', '$', '%', '&'};
+            'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '!', '#', '$', '%', '&',
+            '@', '^', '~', '+', '*', '=', '?', '<', '>', '[', ']', '{', '}', '(', ')', '|', ':',
+            ';', ',', '.', '/', '\\', '\'', '\"', '`', '-', '_'};
 
     @Override
     public String name() {
@@ -55,7 +57,7 @@ public final class ImageMatrixTool implements AgentTool {
         path.addProperty("description", "图片路径,如 E:\\screens\\a.png");
         JsonObject size = new JsonObject();
         size.addProperty("type", "integer");
-        size.addProperty("description", "最长边缩放像素数,默认 32,范围 8~64;MC 素材建议 16/32");
+        size.addProperty("description", "最长边缩放像素数(=墙宽格数),默认 32,范围 8~64;像素画建议 32~64");
         JsonObject mode = new JsonObject();
         mode.addProperty("type", "string");
         JsonArray modes = new JsonArray();
@@ -92,11 +94,12 @@ public final class ImageMatrixTool implements AgentTool {
         } catch (Exception ignored) {
         }
         String mode = ToolRegistry.argStr(args, "mode");
+        String m = mode == null || mode.isBlank() ? "both" : mode.trim().toLowerCase(Locale.ROOT);
         Path p = Path.of(raw.trim());
         if (!p.isAbsolute()) {
             p = Path.of("").toAbsolutePath().resolve(p);
         }
-        return matrix(p, size, mode == null || mode.isBlank() ? "both" : mode.trim().toLowerCase(Locale.ROOT));
+        return matrix(p, size, m);
     }
 
     /** 生成像素矩阵文本(@图片导入共用)。 */
@@ -142,7 +145,7 @@ public final class ImageMatrixTool implements AgentTool {
             }
 
             // ---- 加权中位切分调色板(色数 = min(64, 尺寸×2))----
-            int colorCount = Math.max(8, Math.min(64, Math.min(maxSide * 2, hist.size())));
+            int colorCount = Math.max(8, Math.min(SYMBOLS.length, Math.min(maxSide * 2, hist.size())));
             List<Box> boxes = new ArrayList<>();
             boxes.add(new Box(hist.values()));
             while (boxes.size() < colorCount) {
@@ -239,7 +242,7 @@ public final class ImageMatrixTool implements AgentTool {
                     sb.append(grid[y]).append('\n');
                 }
             }
-            return ToolRegistry.trunc(sb.toString(), 9000);
+            return ToolRegistry.trunc(sb.toString(), 16000);
         } catch (Throwable t) {
             return "生成像素矩阵失败: " + t;
         }

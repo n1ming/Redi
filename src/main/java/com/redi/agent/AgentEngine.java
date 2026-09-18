@@ -67,6 +67,9 @@ public final class AgentEngine {
     /** 当前任务原文(buildRequest 兜底补 user 开头用,引擎线程内访问)。 */
     private String currentTask = "";
 
+    /** 当前环境是否允许作弊(单人开局开作弊 / 多人服务器有 OP 权限);任务开始时探测。 */
+    private volatile boolean cheatsAllowed = false;
+
     /** 工具名的中文标注(UI 展示用:调用工具时在名字后面加括号给玩家看)。 */
     private static final Map<String, String> TOOL_ZH = buildToolZh();
 
@@ -202,6 +205,11 @@ public final class AgentEngine {
             sigCounts.clear();
             currentTask = userText;
             chat.setTaskStart(System.currentTimeMillis());
+            // 每次执行第一件事:判断环境是否允许作弊(单人开局开作弊 / 多人 OP)
+            cheatsAllowed = ClientExec.get(() -> {
+                var p0 = net.minecraft.client.Minecraft.getInstance().player;
+                return p0 != null && p0.hasPermissions(2);
+            }, false);
             synchronized (rounds) {
                 rounds.addLast(List.of(LlmMessage.user(userText)));
             }
@@ -433,6 +441,12 @@ public final class AgentEngine {
         if (tool == null) {
             return "工具执行出错: 未知工具 " + call.name();
         }
+        // 作弊门禁:环境未开放作弊权限时,拒绝执行任何指令(只能口头回答)
+        if ("send_command".equals(tool.name()) && !cheatsAllowed) {
+            return "当前环境未开放作弊权限(单人未开作弊或服务器无 OP),"
+                    + "无法执行任何指令。请改为口头回答:告诉玩家怎么手动完成,"
+                    + "不要再次尝试 send_command。";
+        }
         ChatModel.get().setActivity("调用 " + toolLabel(tool.name()) + "…");
         JsonObject args;
         try {
@@ -662,6 +676,10 @@ public final class AgentEngine {
             }
         }
         StringBuilder sb = new StringBuilder();
+        sb.append(cheatsAllowed
+                ? "[环境状态: 允许作弊——玩家拥有指令权限,send_command 可正常使用。]\n"
+                : "[环境状态: 未开放作弊——无指令权限!禁止调用 send_command,"
+                        + "只能口头回答并指导玩家手动操作;craft_item/smelt_item/send_chat 等非指令工具仍可用。]\n");
         sb.append("你的名字是 Redi(取自 Redstone + AI,谐音 ready——随叫随到的方块助手),装在 Minecraft 玩家手机里,运行在 Minecraft 1.21.1(NeoForge)的 JVM 内。")
           .append("你可以像玩家本人一样观察与行动:读游戏状态、读模组的代码与资源、替玩家发聊天消息或执行指令。\n\n")
           .append("== 取证优先级(硬性要求)==\n")

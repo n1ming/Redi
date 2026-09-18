@@ -300,7 +300,35 @@ public final class AgentEngine {
     private LlmClient.Response request(LlmClient client, ChatModel chat) {
         try {
             try {
-                return client.chat(buildRequest(), ToolRegistry.schemas());
+                // 流式:思考增量实时进思考面板;等待期间显示已用时
+                java.util.concurrent.atomic.AtomicInteger elapsed = new java.util.concurrent.atomic.AtomicInteger();
+                var ticker = new java.util.concurrent.atomic.AtomicBoolean(true);
+                Thread tickThread = new Thread(() -> {
+                    while (ticker.get()) {
+                        try {
+                            Thread.sleep(1000);
+                        } catch (InterruptedException interrupted) {
+                            return;
+                        }
+                        if (ticker.get()) {
+                            chat.setActivity("思考中…(已等待 " + elapsed.incrementAndGet() + "s,上下文大时较慢)");
+                        }
+                    }
+                }, "redi-wait-tick");
+                tickThread.setDaemon(true);
+                tickThread.start();
+                try {
+                    return client.chat(buildRequest(), ToolRegistry.schemas(), new LlmClient.StreamListener() {
+                        @Override
+                        public void onReasoning(String delta) {
+                            chat.streamThink(delta);
+                        }
+                    });
+                } finally {
+                    ticker.set(false);
+                    tickThread.interrupt();
+                    chat.flushStream(); // 流式思考缓冲定稿
+                }
             } catch (Exception first) {
                 if (first instanceof com.redi.llm.LlmClient.BadRequestException || cancelled
                         || !isTransient(first)) {

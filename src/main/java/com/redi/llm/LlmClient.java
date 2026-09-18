@@ -17,6 +17,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.List;
 
 /**
@@ -44,6 +45,18 @@ public final class LlmClient {
      * @param finishReason 服务商标记的结束原因("stop"/"tool_calls"/"length"…),
      *                     "length" = 被 max_tokens 掐断,引擎要自动续写
      */
+    /** 流式 tool_calls 碎片累积器(按 index 聚合 id/name/arguments)。 */
+    private static final class ToolCallAcc {
+        final String id;
+        final String name;
+        final StringBuilder args = new StringBuilder();
+
+        ToolCallAcc(String id, String name) {
+            this.id = id;
+            this.name = name;
+        }
+    }
+
     public record Response(String content, List<ToolCall> toolCalls, String reasoning, String finishReason) {
         public boolean hasToolCalls() {
             return toolCalls != null && !toolCalls.isEmpty();
@@ -85,7 +98,7 @@ public final class LlmClient {
     }
 
     /** 当前在途请求(用于"思考中"的即时打断;join 阻塞被打断后丢弃结果)。 */
-    private volatile java.util.concurrent.CompletableFuture<HttpResponse<String>> inFlight;
+    private volatile java.util.concurrent.CompletableFuture<?> inFlight;
 
     /**
      * assistant 消息带 tool_calls 时是否同时回显 content 字段。
@@ -109,11 +122,17 @@ public final class LlmClient {
         this.config = config;
     }
 
+    /** 流式回调:思考/正文增量(边生成边推送,解决长上下文等待期界面空转)。 */
+    public interface StreamListener {
+        default void onReasoning(String delta) {
+        }
+
+        default void onContent(String delta) {
+        }
+    }
+
     /**
-     * 发起一次对话请求。
-     *
-     * @param tools function 定义(schema 列表),可为 null/空表示不带工具
-     * @throws Exception 网络/HTTP/配置错误;消息要能直接给玩家看(中文)
+     * 发起一次对话请求(非流式,诊断兜底用)。
      */
     public Response chat(List<LlmMessage> messages, List<JsonObject> tools) throws Exception {
         JsonObject body = post(buildPayload(messages, tools));
@@ -168,6 +187,121 @@ public final class LlmClient {
         return new Response(content, calls, reasoning,
                 choice.has("finish_reason") && choice.get("finish_reason").isJsonPrimitive()
                         ? choice.get("finish_reason").getAsString() : "");
+    }
+
+    /**
+     * 流式对话(SSE):思考/正文增量经 handler 实时回调——长上下文等待期间
+     * 界面能看到逐字冒出的思考文本,不再空转。返回组装后的完整 Response。
+     */
+    public Response chat(List<LlmMessage> messages, List<JsonObject> tools, StreamListener listener) throws Exception {
+        JsonObject payload = buildPayload(messages, tools);
+        payload.addProperty("stream", true);
+        String reqJson = GSON.toJson(payload);
+        long seq = TRACE_SEQ.incrementAndGet();
+        long t0 = System.currentTimeMillis();
+        java.nio.file.Path dir = java.nio.file.Path.of("config", "redi", "trace");
+        traceWrite(dir.resolve(seq + "_req_stream.json"), reqJson);
+        HttpRequest request = baseRequestBuilder(completionsUrl())
+                .POST(HttpRequest.BodyPublishers.ofString(reqJson, StandardCharsets.UTF_8))
+                .build();
+        var fut = clientBuilder().build().sendAsync(request, HttpResponse.BodyHandlers.ofLines());
+        inFlight = fut;
+        StringBuilder reasoning = new StringBuilder();
+        StringBuilder content = new StringBuilder();
+        String finish = "";
+        Map<Integer, ToolCallAcc> acc = new java.util.TreeMap<>();
+        try {
+            var lines = fut.join().body();
+            for (var line : (Iterable<String>) lines::iterator) {
+                if (!line.startsWith("data:")) continue;
+                String data = line.substring(5).trim();
+                if (data.isEmpty() || data.equals("[DONE]")) {
+                    if (data.equals("[DONE]")) break;
+                    continue;
+                }
+                JsonObject chunk;
+                try {
+                    chunk = JsonParser.parseString(data).getAsJsonObject();
+                } catch (Exception e) {
+                    continue;
+                }
+                if (chunk.has("error") && chunk.get("error").isJsonObject()) {
+                    JsonObject err = chunk.getAsJsonObject("error");
+                    throw new IOException("模型接口返回错误: " + (err.has("message")
+                            ? err.get("message").getAsString() : err.toString()));
+                }
+                if (!chunk.has("choices") || !chunk.get("choices").isJsonArray()
+                        || chunk.getAsJsonArray("choices").isEmpty()) continue;
+                JsonObject ch = chunk.getAsJsonArray("choices").get(0).getAsJsonObject();
+                if (ch.has("finish_reason") && ch.get("finish_reason").isJsonPrimitive()
+                        && !ch.get("finish_reason").getAsString().isEmpty()) {
+                    finish = ch.get("finish_reason").getAsString();
+                }
+                if (!ch.has("delta") || !ch.get("delta").isJsonObject()) continue;
+                JsonObject delta = ch.getAsJsonObject("delta");
+                if (delta.has("reasoning_content") && delta.get("reasoning_content").isJsonPrimitive()) {
+                    String d = delta.get("reasoning_content").getAsString();
+                    if (!d.isEmpty()) {
+                        reasoning.append(d);
+                        if (listener != null) listener.onReasoning(d);
+                    }
+                }
+                if (delta.has("content") && delta.get("content").isJsonPrimitive()) {
+                    String d = delta.get("content").getAsString();
+                    if (!d.isEmpty()) {
+                        content.append(d);
+                        if (listener != null) listener.onContent(d);
+                    }
+                }
+                if (delta.has("tool_calls") && delta.get("tool_calls").isJsonArray()) {
+                    for (var el : delta.getAsJsonArray("tool_calls")) {
+                        if (!el.isJsonObject()) continue;
+                        JsonObject tc = el.getAsJsonObject();
+                        int index = tc.has("index") && tc.get("index").isJsonPrimitive()
+                                ? tc.get("index").getAsInt() : acc.size();
+                        ToolCallAcc cur = acc.get(index);
+                        if (cur == null) {
+                            String id = tc.has("id") && tc.get("id").isJsonPrimitive()
+                                    ? tc.get("id").getAsString() : "";
+                            String name = "";
+                            if (tc.has("function") && tc.getAsJsonObject("function").has("name")
+                                    && tc.getAsJsonObject("function").get("name").isJsonPrimitive()) {
+                                name = tc.getAsJsonObject("function").get("name").getAsString();
+                            }
+                            cur = new ToolCallAcc(id, name);
+                            acc.put(index, cur);
+                        }
+                        if (tc.has("function") && tc.getAsJsonObject("function").isJsonObject()) {
+                            JsonObject fn = tc.getAsJsonObject("function");
+                            if (fn.has("arguments") && fn.get("arguments").isJsonPrimitive()) {
+                                cur.args.append(fn.get("arguments").getAsString());
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (java.util.concurrent.CancellationException ce) {
+            throw new IOException("已手动停止本次请求。");
+        } catch (Exception e) {
+            Throwable c = e.getCause() != null ? e.getCause() : e;
+            if (c instanceof java.util.concurrent.CancellationException) {
+                throw new IOException("已手动停止本次请求。");
+            }
+            throw e;
+        }
+        long ms = System.currentTimeMillis() - t0;
+        List<ToolCall> callList = new ArrayList<>();
+        for (ToolCallAcc a : acc.values()) {
+            callList.add(new ToolCall(a.id, a.name, a.args.isEmpty() ? "{}" : a.args.toString()));
+        }
+        String respSummary = GSON.toJson(new Response(content.toString(), callList, reasoning.toString(), finish));
+        traceWrite(dir.resolve(seq + "_resp_stream.json"), "stream " + ms + "ms\n" + respSummary);
+        traceIndex(seq + " STREAM 200 " + ms + "ms reqBytes=" + reqJson.length()
+                + " respChars=" + respSummary.length());
+        java.util.function.Consumer<String> hook = logHook;
+        if (hook != null) hook.accept("[llm] #" + seq + " 流式200(" + ms + "ms, 请求 "
+                + reqJson.length() + " 字符)");
+        return new Response(content.toString(), callList, reasoning.toString(), finish);
     }
 
     /** 无工具的便捷对话(设置页“测试连接”用):system + user,返回模型文本。 */
@@ -253,15 +387,21 @@ public final class LlmClient {
         return rb;
     }
 
-    /** 按当前配置(含可选代理)发送请求,返回字符串响应体。 */
-    private HttpResponse<String> send(HttpRequest request) throws Exception {
+    /** 按当前配置构造 HttpClient Builder(含可选代理)。 */
+    private HttpClient.Builder clientBuilder() {
         HttpClient.Builder cb = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(15))
                 .followRedirects(HttpClient.Redirect.NORMAL);
         if (config.proxyHost != null && !config.proxyHost.isBlank() && config.proxyPort > 0) {
             cb.proxy(ProxySelector.of(new InetSocketAddress(config.proxyHost.trim(), config.proxyPort)));
         }
-        var fut = cb.build().sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        return cb;
+    }
+
+    /** 按当前配置(含可选代理)发送请求,返回字符串响应体。 */
+    private HttpResponse<String> send(HttpRequest request) throws Exception {
+        var fut = clientBuilder().build()
+                .sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         inFlight = fut;
         HttpResponse<String> resp;
         try {

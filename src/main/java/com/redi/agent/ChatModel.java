@@ -30,6 +30,8 @@ public final class ChatModel {
     // ---- 实时思考块:任务进行中就出现在聊天里,随工具调用逐条增长 ----
     private long liveThinkTs = -1;
     private final java.util.ArrayList<String> liveThinkSteps = new java.util.ArrayList<>();
+    /** 流式思考缓冲(流式 API 的增量在此累积,定稿后并入步骤)。 */
+    private final StringBuilder streamBuf = new StringBuilder();
 
     private static String thinkTitle(int n) {
         return "思考过程 · " + n + " 步(点击展开)";
@@ -90,6 +92,7 @@ public final class ChatModel {
         }
         liveThinkTs = -1;
         liveThinkSteps.clear();
+        streamBuf.setLength(0);
         seq++;
     }
 
@@ -98,9 +101,37 @@ public final class ChatModel {
         return liveThinkTs >= 0 && liveThinkTs == ts;
     }
 
-    /** 当前实时思考块的步骤快照(没有进行中的块时为空列表);固定思考面板用。 */
+    /** 当前实时思考块的步骤快照(含正在流式累积的缓冲);固定思考面板用。 */
     public synchronized java.util.List<String> liveSteps() {
-        return liveThinkTs >= 0 ? java.util.List.copyOf(liveThinkSteps) : java.util.List.<String>of();
+        if (liveThinkTs < 0) {
+            return java.util.List.of();
+        }
+        java.util.ArrayList<String> out = new java.util.ArrayList<>(liveThinkSteps);
+        if (streamBuf.length() > 0) {
+            out.add(streamBuf.toString());
+        }
+        return java.util.List.copyOf(out);
+    }
+
+    /** 流式思考增量:追加到当前流式缓冲(固定思考面板实时显示)。 */
+    public synchronized void streamThink(String delta) {
+        if (liveThinkTs < 0) {
+            beginThink();
+        }
+        if (delta == null || delta.isEmpty()) {
+            return;
+        }
+        streamBuf.append(delta);
+        seq++;
+    }
+
+    /** 把流式缓冲定稿为一条思考步骤(工具调用开始前调用)。 */
+    public synchronized void flushStream() {
+        if (streamBuf.length() > 0) {
+            liveThinkSteps.add(streamBuf.toString().trim());
+            streamBuf.setLength(0);
+        }
+        seq++;
     }
     private long seq = 0; // 每次渲染循环递增,UI 可用来决定是否重排
 

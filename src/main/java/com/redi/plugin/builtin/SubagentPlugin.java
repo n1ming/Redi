@@ -3,6 +3,7 @@ package com.redi.plugin.builtin;
 import com.redi.agent.AgentSession;
 import com.redi.plugin.AgentContext;
 import com.redi.plugin.AgentPlugin;
+import com.redi.tools.AgentTaskTool;
 import com.redi.tools.SpawnTaskTool;
 
 /**
@@ -17,6 +18,7 @@ public final class SubagentPlugin implements AgentPlugin {
 
     @Override
     public void setup(AgentContext ctx) {
-        ctx.tool(new SpawnTaskTool());
+        ctx.tool(new SpawnTaskTool()); // 同步便捷:派发即等结果
+        ctx.tool(new AgentTaskTool()); // 异步控制台:start/status/stop/send/join
     }
 }

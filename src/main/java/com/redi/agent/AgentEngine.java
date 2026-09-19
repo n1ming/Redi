@@ -30,8 +30,13 @@ public final class AgentEngine {
     private static final java.util.Map<String, AgentSession> BY_FILE = new java.util.concurrent.ConcurrentHashMap<>();
     /** 当前交互(显示)的主会话。 */
     private static volatile AgentSession current = AgentSession.mainSession();
-    /** 活跃子 agent(取消传播/状态查询)。 */
-    private static final java.util.List<AgentSession> SUBAGENTS = new java.util.concurrent.CopyOnWriteArrayList<>();
+    /** 子 agent 注册表:id → 子会话(进度查询/掐断/重指/取结果)。
+     *  完成的子保留(父可 join 结果或继续对话),仅在上限内淘汰最旧的非运行中条目。 */
+    private static final java.util.Map<String, AgentSession> AGENTS =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.concurrent.atomic.AtomicLong AGENT_SEQ =
+            new java.util.concurrent.atomic.AtomicLong();
+    private static final int AGENTS_MAX = 16;
 
     static {
         ChatModel.setActive(current.chat());
@@ -64,8 +69,8 @@ public final class AgentEngine {
     /** 停止当前会话任务,并联动停止全部子 agent。 */
     public void cancel() {
         current.cancel();
-        for (AgentSession s : SUBAGENTS) {
-            s.cancel();
+        for (AgentSession s : AGENTS.values()) {
+            s.cancel(); // 全部子 agent 联动停止
         }
     }
 
@@ -134,16 +139,126 @@ public final class AgentEngine {
 
     // ---------------------------------------------------------------- 子 agent
 
+    /** 派子 agent(非阻塞):立即返回 agent id,子在独立线程执行。 */
+    public static String agentStart(String task) {
+        AgentSession sub = AgentSession.transientSession();
+        String id = "a" + AGENT_SEQ.incrementAndGet();
+        AGENTS.put(id, sub);
+        // 上限淘汰:移除最旧的非运行中条目
+        if (AGENTS.size() > AGENTS_MAX) {
+            for (String k : AGENTS.keySet()) {
+                if (!AGENTS.get(k).busy()) {
+                    AGENTS.remove(k);
+                    if (AGENTS.size() <= AGENTS_MAX) break;
+                }
+            }
+        }
+        sub.submit(task, task);
+        return id;
+    }
+
+    /** 子 agent 实时进度文本:状态/当前活动/最近思考与工具步骤/已有回答。 */
+    public static String agentStatus(String id) {
+        AgentSession sub = AGENTS.get(id);
+        if (sub == null) {
+            return "没有 id 为 " + id + " 的子 agent(用 action=start 创建)。";
+        }
+        StringBuilder sb = new StringBuilder("子 agent " + id + ": ");
+        if (sub.busy()) {
+            sb.append("运行中");
+            String act = sub.chat().activity();
+            if (act != null && !act.isBlank()) {
+                sb.append("(当前: ").append(act.trim()).append(")");
+            }
+        } else {
+            sb.append(sub.lastAnswer().isEmpty() ? "空闲(无产出)" : "已完成");
+        }
+        sb.append('\n');
+        // 最近步骤(干了什么):liveSteps 含流式缓冲
+        java.util.List<String> steps = sub.chat().liveSteps();
+        int from = Math.max(0, steps.size() - 8);
+        if (from < steps.size()) {
+            sb.append("最近动作:\n");
+            for (int k = from; k < steps.size(); k++) {
+                String st = steps.get(k);
+                if (st.length() > 100) st = st.substring(0, 100) + "…";
+                sb.append("- ").append(st).append('\n');
+            }
+        }
+        String ans = sub.lastAnswer();
+        if (!ans.isEmpty()) {
+            sb.append("已有回答(尾 300 字): …").append(ans.substring(Math.max(0, ans.length() - 300)));
+        }
+        return sb.toString();
+    }
+
+    /** 掐断子 agent 当前任务(会话保留,可再 send 重指)。 */
+    public static String agentStop(String id) {
+        AgentSession sub = AGENTS.get(id);
+        if (sub == null) {
+            return "没有 id 为 " + id + " 的子 agent。";
+        }
+        if (!sub.busy()) {
+            return "子 agent " + id + " 本就空闲(无运行中任务)。";
+        }
+        sub.cancel();
+        // 等它退出运行态(通常 1-3 秒,在途请求被打断后循环检测 cancelled 即退)
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (sub.busy() && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(150);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        return sub.busy() ? "已发停止信号,子 agent 正在收尾(稍后 status 确认)。"
+                : "子 agent " + id + " 已停止(会话保留,可用 send 重新指派)。";
+    }
+
+    /** 给子 agent 发新指令:运行中先掐断再重指;空闲直接继续(上下文保留)。 */
+    public static String agentSend(String id, String message) {
+        AgentSession sub = AGENTS.get(id);
+        if (sub == null) {
+            return "没有 id 为 " + id + " 的子 agent。";
+        }
+        if (sub.busy()) {
+            agentStop(id); // 掐断当前,按新指引重来
+        }
+        sub.submit(message, message);
+        return "已向子 agent " + id + " 发出新指令(其历史上下文保留,它会结合此前进展继续)。";
+    }
+
+    /** 阻塞等待子 agent 完成当前任务,返回最终回答。 */
+    public static String agentJoin(String id) {
+        AgentSession sub = AGENTS.get(id);
+        if (sub == null) {
+            return "没有 id 为 " + id + " 的子 agent。";
+        }
+        long deadline = System.currentTimeMillis() + 15 * 60_000;
+        while (sub.busy() && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(300);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        if (sub.busy()) {
+            return "子 agent " + id + " 超时(15 分钟)仍在运行;可用 status 看进度或 stop 停止。";
+        }
+        String answer = sub.lastAnswer();
+        return answer.isEmpty() ? "子 agent " + id + " 没有最终回答(可能被停止)。" : answer;
+    }
+
     /**
-     * 派一个子 agent(临时会话,干净上下文)执行子任务并等待其完成,返回最终回答。
-     * parent 非空时:父取消 → 联动取消子。超时上限 15 分钟。
+     * 同步派子 agent(便捷:启动即等完成)——spawn_task 工具用。
      */
     public static String spawnSubagent(String task, AgentSession parent) {
-        AgentSession sub = AgentSession.transientSession();
-        SUBAGENTS.add(sub);
+        String id = agentStart(task);
         try {
-            sub.submit(task, task);
-            long deadline = System.currentTimeMillis() + 15 * 60_000L;
+            long deadline = System.currentTimeMillis() + 15 * 60_000;
+            AgentSession sub = AGENTS.get(id);
             while (sub.busy() && System.currentTimeMillis() < deadline) {
                 if (parent != null && parent.isCancelled()) {
                     sub.cancel(); // 父会话被停止:联动停子
@@ -166,7 +281,7 @@ public final class AgentEngine {
             }
             return answer;
         } finally {
-            SUBAGENTS.remove(sub);
+            AGENTS.remove(id); // 同步用法一次性,不留注册表
         }
     }
 
@@ -324,6 +439,7 @@ public final class AgentEngine {
         m.put("send_chat", "发聊天");
         m.put("send_command", "执行指令");
         m.put("spawn_task", "派子agent");
+        m.put("agent_task", "子agent控制台");
         m.put("read_guidebook", "读模组手册");
         m.put("read_file", "读本机文件");
         m.put("list_files", "列目录");

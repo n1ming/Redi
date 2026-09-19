@@ -135,6 +135,10 @@ public final class LlmClient {
      * 发起一次对话请求(非流式,诊断兜底用)。
      */
     public Response chat(List<LlmMessage> messages, List<JsonObject> tools) throws Exception {
+        if (isAnthropic()) {
+            return AnthropicAdapter.parseResponse(post(AnthropicAdapter.buildPayload(
+                    config.model == null ? "" : config.model.trim(), messages, tools)));
+        }
         JsonObject body = post(buildPayload(messages, tools));
 
         // 有的服务在 HTTP 200 里也会带 error 字段,先检查
@@ -194,6 +198,9 @@ public final class LlmClient {
      * 界面能看到逐字冒出的思考文本,不再空转。返回组装后的完整 Response。
      */
     public Response chat(List<LlmMessage> messages, List<JsonObject> tools, StreamListener listener) throws Exception {
+        if (isAnthropic()) {
+            return chatAnthropicStream(messages, tools, listener);
+        }
         JsonObject payload = buildPayload(messages, tools);
         payload.addProperty("stream", true);
         String reqJson = GSON.toJson(payload);
@@ -304,6 +311,48 @@ public final class LlmClient {
         return new Response(content.toString(), callList, reasoning.toString(), finish);
     }
 
+    /** Anthropic 流式(SSE):content_block_delta 增量,tool_use 碎片聚合。 */
+    private Response chatAnthropicStream(List<LlmMessage> messages, List<JsonObject> tools,
+                                         StreamListener listener) throws Exception {
+        JsonObject payload = AnthropicAdapter.buildPayload(
+                config.model == null ? "" : config.model.trim(), messages, tools);
+        payload.addProperty("stream", true);
+        String reqJson = GSON.toJson(payload);
+        long seq = TRACE_SEQ.incrementAndGet();
+        long t0 = System.currentTimeMillis();
+        java.nio.file.Path dir = java.nio.file.Path.of("config", "redi", "trace");
+        traceWrite(dir.resolve(seq + "_req_stream.json"), reqJson);
+        HttpRequest request = baseRequestBuilder(completionsUrl())
+                .POST(HttpRequest.BodyPublishers.ofString(reqJson, StandardCharsets.UTF_8))
+                .build();
+        var fut = clientBuilder().build().sendAsync(request, HttpResponse.BodyHandlers.ofLines());
+        inFlight = fut;
+        AnthropicAdapter.StreamState state = new AnthropicAdapter.StreamState();
+        try {
+            for (var line : (Iterable<String>) fut.join().body()::iterator) {
+                if (!line.startsWith("data:")) continue; // event:/ping 行忽略
+                String data = line.substring(5).trim();
+                if (data.isEmpty()) continue;
+                if (!AnthropicAdapter.onStreamLine(data, state, listener)) break;
+            }
+        } catch (java.util.concurrent.CancellationException ce) {
+            throw new IOException("已手动停止本次请求。");
+        } catch (Exception e) {
+            Throwable c = e.getCause() != null ? e.getCause() : e;
+            if (c instanceof java.util.concurrent.CancellationException) {
+                throw new IOException("已手动停止本次请求。");
+            }
+            throw e;
+        }
+        long ms = System.currentTimeMillis() - t0;
+        Response resp = AnthropicAdapter.toResponse(state);
+        traceWrite(dir.resolve(seq + "_resp_stream.json"), "stream " + ms + "ms\n" + GSON.toJson(resp));
+        traceIndex(seq + " STREAM 200 " + ms + "ms reqBytes=" + reqJson.length());
+        java.util.function.Consumer<String> hook = logHook;
+        if (hook != null) hook.accept("[llm] #" + seq + " 流式200(" + ms + "ms, 请求 " + reqJson.length() + " 字符)");
+        return resp;
+    }
+
     /** 无工具的便捷对话(设置页“测试连接”用):system + user,返回模型文本。 */
     public String simpleChat(String prompt) throws Exception {
         List<LlmMessage> msgs = List.of(
@@ -326,7 +375,10 @@ public final class LlmClient {
         if (url.endsWith("/chat/completions")) {
             url = url.substring(0, url.length() - "/chat/completions".length());
         }
-        HttpRequest request = baseRequestBuilder(url + "/models").GET().build();
+        String modelsUrl = isAnthropic()
+                ? (url.endsWith("/v1") ? url + "/models" : url + "/v1/models")
+                : url + "/models";
+        HttpRequest request = baseRequestBuilder(modelsUrl).GET().build();
         HttpResponse<String> resp = send(request);
         if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
             String snippet = resp.body() == null ? "" : resp.body().replace('\n', ' ');
@@ -363,9 +415,17 @@ public final class LlmClient {
         return url;
     }
 
+    /** 当前配置是否为 Anthropic 兼容风格。 */
+    private boolean isAnthropic() {
+        return "anthropic".equalsIgnoreCase(config.apiStyle);
+    }
+
     /** 对话端点:玩家可能直接把完整 /chat/completions 填进 base_url,去重要。 */
     private String completionsUrl() {
         String url = normalizeBaseUrl();
+        if (isAnthropic()) {
+            return AnthropicAdapter.endpoint(url);
+        }
         if (!url.endsWith("/chat/completions")) url = url + "/chat/completions";
         return url;
     }
@@ -381,7 +441,12 @@ public final class LlmClient {
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("base_url 无效: " + url);
         }
-        if (config.apiKey != null && !config.apiKey.isBlank()) {
+        if (isAnthropic()) {
+            if (config.apiKey != null && !config.apiKey.isBlank()) {
+                rb.header("x-api-key", config.apiKey.trim());
+            }
+            rb.header("anthropic-version", "2023-06-01");
+        } else if (config.apiKey != null && !config.apiKey.isBlank()) {
             rb.header("Authorization", "Bearer " + config.apiKey.trim());
         }
         return rb;

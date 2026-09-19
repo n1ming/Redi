@@ -24,6 +24,8 @@ public final class AgentConfig {
     public String provider = "custom";
     /** OpenAI 兼容接口根地址,如 https://api.deepseek.com/v1 */
     public String baseUrl = "";
+    /** 接口风格:openai(OpenAI 兼容 /chat/completions)或 anthropic(Anthropic 兼容 /v1/messages)。 */
+    public String apiStyle = "openai";
     /** 当前激活服务商的 API Key(与 providerKeys[provider] 同步)。 */
     public String apiKey = "";
     /** 每个服务商各自记忆的 Key,切换预设时互不串味。 */
@@ -60,6 +62,7 @@ public final class AgentConfig {
             if (loaded != null) {
                 this.provider = loaded.provider;
                 this.baseUrl = loaded.baseUrl;
+                this.apiStyle = loaded.apiStyle == null || loaded.apiStyle.isBlank() ? "openai" : loaded.apiStyle;
                 this.apiKey = loaded.apiKey;
                 this.providerKeys = loaded.providerKeys == null ? new LinkedHashMap<>() : loaded.providerKeys;
                 this.model = loaded.model;

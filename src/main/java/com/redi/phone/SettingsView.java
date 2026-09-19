@@ -70,7 +70,7 @@ final class SettingsView {
     private volatile String status = "";
 
     // 渲染期刷新的悬停态(点击判定复用,与 mcphone 内置页同套路)
-    private boolean backHovered, chipHovered, testHovered, saveHovered, modelBtnHovered;
+    private boolean backHovered, chipHovered, testHovered, saveHovered, modelBtnHovered, styleHovered;
 
     SettingsView(Runnable backToChat) {
         this.backToChat = backToChat;
@@ -124,19 +124,22 @@ final class SettingsView {
             positionAndRender(apiKeyBox, g, x + 2, y + 78, canvas);
             g.drawString(font, Component.translatable("redi.settings.model"), x + 2, y + 93, canvas.style().subtleColor(), false);
             positionAndRender(modelBox, g, x + 2, y + 104, FORM_W, canvas);
-            // 自定义模式纯手填,不提供在线拉取;三个框都可见,焦点跟随点击即可
+            // 接口风格(自定义专属):OpenAI 兼容 / Anthropic 兼容,点击切换
+            g.drawString(font, "接口风格", x + 2, y + 119, canvas.style().subtleColor(), false);
+            styleHovered = Widgets.button(canvas,
+                    "anthropic".equalsIgnoreCase(AgentConfig.get().apiStyle) ? "Anthropic 兼容 ▸" : "OpenAI 兼容 ▸",
+                    x + 2, y + 129, FORM_W, BOX_H, canvas.style().bodyColor(), true);
         }
-
-        // 操作按钮(两种布局统一锚在 y+119..131)
+        int btnY = official ? y + 119 : y + 144;
         testHovered = Widgets.button(canvas, Component.translatable("redi.settings.test").getString(),
-                x + 2, y + 119, 54, BOX_H, canvas.style().accentColor(), !testing);
+                x + 2, btnY, 54, BOX_H, canvas.style().accentColor(), !testing);
         saveHovered = Widgets.button(canvas, Component.translatable("redi.settings.save").getString(),
-                x + 64, y + 119, 54, BOX_H, canvas.style().bodyColor(), true);
+                x + 64, btnY, 54, BOX_H, canvas.style().bodyColor(), true);
 
         // 状态行
         if (!status.isEmpty()) {
             int color = testing ? canvas.style().subtleColor() : (statusOk ? canvas.style().accentColor() : COLOR_ERROR);
-            int sy = y + 134;
+            int sy = official ? y + 134 : y + 159;
             for (FormattedCharSequence line : font.split(Component.literal(status), FORM_W)) {
                 if (sy > y + 166) break;
                 g.drawString(font, line, x + 2, sy, color, false);
@@ -302,6 +305,11 @@ final class SettingsView {
             boolean official = AgentConfig.isOfficialProvider(providerId);
             if (official && modelBtnHovered) {
                 openModelPicker();
+                return true;
+            }
+            if (styleHovered) {
+                AgentConfig cfg = AgentConfig.get();
+                cfg.apiStyle = "anthropic".equalsIgnoreCase(cfg.apiStyle) ? "openai" : "anthropic";
                 return true;
             }
             if (testHovered) {
@@ -501,6 +509,7 @@ final class SettingsView {
         c.provider = providerId;
         c.baseUrl = baseUrlBox.getValue().trim();
         c.apiKey = apiKeyBox.getValue().trim();
+        c.apiStyle = AgentConfig.get().apiStyle;
         c.model = modelBox.getValue().trim();
         c.temperature = src.temperature;
         c.timeoutSeconds = src.timeoutSeconds;

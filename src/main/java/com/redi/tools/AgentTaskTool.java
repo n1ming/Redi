@@ -29,7 +29,7 @@ public final class AgentTaskTool implements AgentTool {
                 + "- join:阻塞等子 agent 完成(id)并返回最终回答。"
                 + "推荐工作流:大任务拆解后 start 多个子 agent → 自己做别的 → status 查进度 →"
                 + "跑偏就 stop+send 修正 → 最后 join 逐个收结果汇总。"
-                + "子 agent 看不到你的会话历史,start 的 task 必须自包含。";
+                + "子 agent 看不到你的会话历史,start 的 task 必须自包含。每个子 agent 的会话会以 agent_aN 为名出现在玩家的历史会话列表里,你和玩家都能切进去实时查看它在干什么。";
     }
 
     @Override
@@ -81,7 +81,7 @@ public final class AgentTaskTool implements AgentTool {
                     return "start 需要 task 参数(子 agent 的任务描述)。";
                 }
                 String newId = AgentEngine.agentStart(task.trim());
-                return "子 agent 已派发: id=" + newId + "(后台运行中;status 查进度,join 等结果)";
+                return "子 agent 已派发: id=" + newId + "(后台运行中;status 查进度,join 等结果。它的会话已以 agent_" + newId + " 出现在历史会话列表,玩家可随时切进去实时查看过程)";
             }
             case "status" -> {
                 if (id == null || id.isBlank()) {

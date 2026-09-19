@@ -139,12 +139,14 @@ public final class AgentEngine {
 
     // ---------------------------------------------------------------- 子 agent
 
-    /** 派子 agent(非阻塞):立即返回 agent id,子在独立线程执行。 */
+    /** 派子 agent(非阻塞):立即返回 agent id,子在独立线程执行。
+     *  子会话是正式会话:标题 agent_aN,立即出现在历史会话列表里——
+     *  玩家(和你)可随时切进去实时查看它的过程。 */
     public static String agentStart(String task) {
-        AgentSession sub = AgentSession.transientSession();
+        AgentSession sub = AgentSession.mainSession();
         String id = "a" + AGENT_SEQ.incrementAndGet();
         AGENTS.put(id, sub);
-        // 上限淘汰:移除最旧的非运行中条目
+        // 上限淘汰:移除最旧的非运行中条目(仅 id 注册表;会话文件与 BY_FILE 保留可切)
         if (AGENTS.size() > AGENTS_MAX) {
             for (String k : AGENTS.keySet()) {
                 if (!AGENTS.get(k).busy()) {
@@ -153,8 +155,26 @@ public final class AgentEngine {
                 }
             }
         }
+        sub.title = "agent_" + id;
+        sub.fileName = ChatStore.newSessionFile();
+        registerByFile(sub); // 历史切换复用同一实例(实时过程可见的关键)
+        ChatStore.saveSession(sub); // 立即落盘:历史会话列表马上能看到 agent_aN
         sub.submit(task, task);
         return id;
+    }
+
+    /** 把会话按其 fileName 注册进切换表(历史切换复用实例)。 */
+    private static void registerByFile(AgentSession s) {
+        if (s.fileName != null) {
+            BY_FILE.put(s.fileName, s);
+        }
+    }
+
+    /** 历史会话被删除时同步注销实例(避免切回幽灵会话)。 */
+    public static void dropSession(String fileName) {
+        if (fileName != null) {
+            BY_FILE.remove(fileName);
+        }
     }
 
     /** 子 agent 实时进度文本:状态/当前活动/最近思考与工具步骤/已有回答。 */
@@ -281,7 +301,7 @@ public final class AgentEngine {
             }
             return answer;
         } finally {
-            AGENTS.remove(id); // 同步用法一次性,不留注册表
+            // 保留注册:子会话已按 agent_aN 落盘,历史里可回看全程
         }
     }
 

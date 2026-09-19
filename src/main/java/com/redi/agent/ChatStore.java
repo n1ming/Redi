@@ -146,7 +146,8 @@ public final class ChatStore {
                 session.fileName = newSessionFile();
             }
             Stored s = new Stored();
-            s.title = deriveTitle(session.chat().snapshot());
+            s.title = session.title != null && !session.title.isBlank()
+                    ? session.title : deriveTitle(session.chat().snapshot());
             s.savedAt = System.currentTimeMillis();
             s.messages = new ArrayList<>();
             for (ChatModel.Msg m : session.chat().snapshot()) {
@@ -245,9 +246,7 @@ public final class ChatStore {
         try {
             Path p = safeResolve(fileName);
             if (p != null && Files.deleteIfExists(p)) {
-                if (p.equals(currentFile)) {
-                    currentFile = null; // 删掉的正是当前绑定文件:下次保存开新文件
-                }
+                AgentEngine.dropSession(fileName); // 注销实例,避免历史切换切到幽灵
                 revision++;
             }
         } catch (Exception e) {

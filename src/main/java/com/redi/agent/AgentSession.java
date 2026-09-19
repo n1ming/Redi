@@ -61,8 +61,10 @@ public final class AgentSession {
     private String currentTask = "";
     /** 环境作弊权限(任务开始探测)。 */
     private volatile boolean cheatsAllowed = false;
-    /** 对应 ChatStore 文件(主会话);null = 子 agent 临时会话。 */
+    /** 对应 ChatStore 文件(主会话与子 agent 会话都有;null = 未分配)。 */
     String fileName;
+    /** 会话标题覆盖(子 agent 用 "agent_aN";null = 按首条消息自动取名)。 */
+    String title;
     /** 是否主会话(影响存档与完成事件)。 */
     final boolean main;
 

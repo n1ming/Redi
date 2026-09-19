@@ -137,7 +137,8 @@ public final class LlmClient {
     public Response chat(List<LlmMessage> messages, List<JsonObject> tools) throws Exception {
         if (isAnthropic()) {
             return AnthropicAdapter.parseResponse(post(AnthropicAdapter.buildPayload(
-                    config.model == null ? "" : config.model.trim(), messages, tools)));
+                    config.model == null ? "" : config.model.trim(), messages, tools,
+                    anthropicMaxTokens > 0 ? anthropicMaxTokens : AnthropicAdapter.MAX_TOKENS)));
         }
         JsonObject body = post(buildPayload(messages, tools));
 
@@ -315,7 +316,8 @@ public final class LlmClient {
     private Response chatAnthropicStream(List<LlmMessage> messages, List<JsonObject> tools,
                                          StreamListener listener) throws Exception {
         JsonObject payload = AnthropicAdapter.buildPayload(
-                config.model == null ? "" : config.model.trim(), messages, tools);
+                config.model == null ? "" : config.model.trim(), messages, tools,
+                anthropicMaxTokens > 0 ? anthropicMaxTokens : AnthropicAdapter.MAX_TOKENS);
         payload.addProperty("stream", true);
         String reqJson = GSON.toJson(payload);
         long seq = TRACE_SEQ.incrementAndGet();
@@ -418,6 +420,31 @@ public final class LlmClient {
     /** 当前配置是否为 Anthropic 兼容风格。 */
     private boolean isAnthropic() {
         return "anthropic".equalsIgnoreCase(config.apiStyle);
+    }
+
+    /** Anthropic 风格的输出配额(协议必填字段);0=默认 8192。 */
+    private volatile int anthropicMaxTokens = 0;
+
+    /** 还原默认配额(服务商拒绝大配额时)。返回 true=确实有配额被还原。 */
+    public boolean resetMaxTokens() {
+        if (anthropicMaxTokens > 0) {
+            anthropicMaxTokens = 0;
+            return true;
+        }
+        return false;
+    }
+
+    /** 扩容 Anthropic 输出配额(×2,封顶 131072);返回 false=已到顶。 */
+    public boolean bumpMaxTokens() {
+        if (!isAnthropic()) {
+            return false; // OpenAI 风格不发 max_tokens,无需扩容
+        }
+        int cur = anthropicMaxTokens > 0 ? anthropicMaxTokens : AnthropicAdapter.MAX_TOKENS;
+        if (cur >= AnthropicAdapter.MAX_TOKENS_CAP) {
+            return false;
+        }
+        anthropicMaxTokens = Math.min(AnthropicAdapter.MAX_TOKENS_CAP, cur * 2);
+        return true;
     }
 
     /** 对话端点:玩家可能直接把完整 /chat/completions 填进 base_url,去重要。 */

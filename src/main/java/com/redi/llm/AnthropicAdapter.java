@@ -22,8 +22,11 @@ import java.util.List;
  * 流式:{@code content_block_start/delta} 事件,text/thinking/input_json 增量。</p>
  */
 final class AnthropicAdapter {
-    /** Anthropic 要求 max_tokens 必填;给足一档(协议无法省略,等效"尽量大")。 */
+    /** Anthropic 协议 max_tokens 必填(无法省略)。思考型模型思考也计入此配额:
+     *  挤压时由 LlmClient.bumpMaxTokens() 翻倍扩容(8192→…→131072 探测上限),
+     *  服务商不支持时返回 400,引擎自动回退并按"长度截断→续写"处理。 */
     static final int MAX_TOKENS = 8192;
+    static final int MAX_TOKENS_CAP = 131072;
 
     private AnthropicAdapter() {
     }
@@ -38,10 +41,10 @@ final class AnthropicAdapter {
     }
 
     /** OpenAI 形态消息列表 → Anthropic 请求体(不含 stream 字段)。 */
-    static JsonObject buildPayload(String model, List<LlmMessage> messages, List<JsonObject> tools) {
+    static JsonObject buildPayload(String model, List<LlmMessage> messages, List<JsonObject> tools, int maxTokens) {
         JsonObject payload = new JsonObject();
         payload.addProperty("model", model);
-        payload.addProperty("max_tokens", MAX_TOKENS);
+        payload.addProperty("max_tokens", Math.max(1024, maxTokens));
         StringBuilder system = new StringBuilder();
         JsonArray msgs = new JsonArray();
         JsonArray pendingToolResults = new JsonArray(); // 连续 tool 结果合并进一条 user

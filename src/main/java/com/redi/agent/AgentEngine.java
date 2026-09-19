@@ -206,10 +206,15 @@ public final class AgentEngine {
             currentTask = userText;
             chat.setTaskStart(System.currentTimeMillis());
             // 每次执行第一件事:判断环境是否允许作弊(单人开局开作弊 / 多人 OP)
-            cheatsAllowed = ClientExec.get(() -> {
-                var p0 = net.minecraft.client.Minecraft.getInstance().player;
-                return p0 != null && p0.hasPermissions(2);
-            }, false);
+            try {
+                Class<?> mc = Class.forName("net.minecraft.client.Minecraft");
+                Object inst = mc.getMethod("getInstance").invoke(null);
+                Object player = inst.getClass().getField("player").get(inst);
+                cheatsAllowed = player != null && (Boolean) player.getClass()
+                        .getMethod("hasPermissions", int.class).invoke(player, 2);
+            } catch (Throwable notInGame) {
+                cheatsAllowed = false; // 无头/不可用环境:按无权限处理
+            }
             synchronized (rounds) {
                 rounds.addLast(List.of(LlmMessage.user(userText)));
             }
@@ -243,10 +248,18 @@ public final class AgentEngine {
                 }
                 String content = resp.content() == null ? "" : resp.content().trim();
                 if (!resp.hasToolCalls() && content.isEmpty()) {
-                    // 空响应:同请求自动重试一次,避免聊天界面静默空白
-                    resp = request(client, chat);
-                    if (resp == null) return;
-                    content = resp.content() == null ? "" : resp.content().trim();
+                    // 空响应。若因 length 截断(思考配额挤压)→ 扩容配额再试;否则同请求重试
+                    if (resp.truncatedByLength() && client.bumpMaxTokens()) {
+                        chat.setActivity("模型思考较长,已扩大输出配额重试…");
+                        resp = request(client, chat);
+                        if (resp == null) return;
+                        content = resp.content() == null ? "" : resp.content().trim();
+                    }
+                    if (!resp.hasToolCalls() && content.isEmpty()) {
+                        resp = request(client, chat);
+                        if (resp == null) return;
+                        content = resp.content() == null ? "" : resp.content().trim();
+                    }
                     if (!resp.hasToolCalls() && content.isEmpty()) {
                         chat.append(ChatModel.Role.NOTE,
                                 "模型没有返回内容,已自动重试仍为空。请换个说法再试,或点「■」停止。");
@@ -267,6 +280,7 @@ public final class AgentEngine {
                     if (!resp.truncatedByLength()) {
                         return;
                     }
+                    client.bumpMaxTokens(); // 续写请求给更大配额
                     chat.setActivity("回答被截断,自动续写…");
                     addRound(List.of(LlmMessage.user(
                             "(继续:刚才的回答因长度被截断,从中断处接着输出,不要重复已经说过的内容;完成即停)")));
@@ -309,38 +323,57 @@ public final class AgentEngine {
      * 400(服务商对超长/超深对话的消息校验限制)→ 裁掉最早的一半轮次后自动重试一次。
      * 瞬时故障(超时/连接中断)→ 自动重试一次(上下文很大时服务商处理可能超过一分钟)。
      */
+    /** 流式调用 + 思考缓冲定稿(所有请求路径共用)。 */
+    private LlmClient.Response streamChat(LlmClient client, ChatModel chat) throws Exception {
+        try {
+            return client.chat(buildRequest(), ToolRegistry.schemas(), new LlmClient.StreamListener() {
+                @Override
+                public void onReasoning(String delta) {
+                    chat.streamThink(delta);
+                }
+            });
+        } finally {
+            chat.flushStream(); // 流式思考缓冲定稿
+        }
+    }
+
+    /**
+     * 发一次请求;失败时向玩家报错并返回 null。
+     * 主路径 = 流式。失败分流:
+     * ①服务商拒绝当前 max_tokens(400 含 max_tokens 字样)→ 还原默认配额立即重试一次;
+     * ②瞬时故障(超时/连接中断)→ 自动重试一次;
+     * ③其余 400 → 交给外层自适应链(裁剪/回显切换)。
+     */
+    /**
+     * 发一次请求;失败时向玩家报错并返回 null。主路径 = 流式。失败分流:
+     * ①max_tokens 被服务商拒绝(400 含 max_tokens)→ 还原默认配额立即重试一次;
+     * ②瞬时故障(超时/连接中断)→ 自动重试一次;
+     * ③其余 400 → 外层自适应链(裁剪/回显切换);
+     * ④其它 → 中文错误。
+     */
     private LlmClient.Response request(LlmClient client, ChatModel chat) {
         try {
             try {
-                // 流式:思考增量实时进思考面板;等待期间显示已用时
-                // 总耗时由 ChatModel.taskStartMs 驱动(UI 每帧计算),不再用线程覆盖活动文案
-                try {
-                    return client.chat(buildRequest(), ToolRegistry.schemas(), new LlmClient.StreamListener() {
-                        @Override
-                        public void onReasoning(String delta) {
-                            chat.streamThink(delta);
-                        }
-                    });
-                } finally {
-                    chat.flushStream(); // 流式思考缓冲定稿
-                }
+                return streamChat(client, chat);
             } catch (Exception first) {
-                if (first instanceof com.redi.llm.LlmClient.BadRequestException || cancelled
-                        || !isTransient(first)) {
-                    throw first;
+                // ①max_tokens 被服务商拒绝(配额超上限):还原默认配额立即重试一次
+                if (first instanceof com.redi.llm.LlmClient.BadRequestException
+                        && String.valueOf(first.getMessage()).toLowerCase(java.util.Locale.ROOT).contains("max_tokens")
+                        && client.resetMaxTokens()) {
+                    return streamChat(client, chat);
                 }
-                chat.setActivity("请求超时(上下文较大处理较慢),自动重试…");
-                Thread.sleep(800);
-                if (cancelled) {
-                    throw first;
+                // ②瞬时故障(超时/连接中断):自动重试一次
+                if (!cancelled && isTransient(first)) {
+                    chat.setActivity("请求超时(上下文较大处理较慢),自动重试…");
+                    Thread.sleep(800);
+                    if (!cancelled) {
+                        return streamChat(client, chat);
+                    }
                 }
-                return client.chat(buildRequest(), ToolRegistry.schemas());
+                throw first; // 交给外层:BadRequest → 自适应链;其它 → 错误上报
             }
         } catch (com.redi.llm.LlmClient.BadRequestException e) {
-
-            // 400 自适配重试(全程备份,失败即恢复原对话,不污染后续):
-            // ①结构化裁剪(保用户锚,最多 6 轮) ②恢复完整历史 + 切 content 回显格式(null/省略)
-            // ③恢复完整 + 裁剪 + 切回
+            // ---- 400 自适应重试(全程备份,失败即恢复原对话,不污染后续) ----
             java.util.List<java.util.List<LlmMessage>> backup;
             synchronized (rounds) {
                 backup = new java.util.ArrayList<>(rounds);
@@ -381,16 +414,10 @@ public final class AgentEngine {
                     }
                     return client.chat(buildRequest(), ToolRegistry.schemas());
                 } catch (Exception e4) {
-                    // 全部尝试失败:恢复完整历史(绝不留下裁剪后的残缺状态毒化下一个任务)
-                    synchronized (rounds) {
-                        rounds.clear();
-                        rounds.addAll(backup);
-                    }
                     if (cancelled) {
                         chat.append(ChatModel.Role.NOTE, "已停止。");
                     } else {
-                        chat.append(ChatModel.Role.ERROR,
-                                "模型请求失败(已尝试格式切换与上下文裁剪): " + e4.getMessage());
+                        chat.append(ChatModel.Role.ERROR, "模型请求失败(已尝试格式切换与上下文裁剪): " + e4.getMessage());
                     }
                     return null;
                 }
@@ -405,12 +432,19 @@ public final class AgentEngine {
         } catch (Exception e) {
             if (cancelled) {
                 chat.append(ChatModel.Role.NOTE, "已停止。");
-            } else {
-                chat.append(ChatModel.Role.ERROR, "模型请求失败: " + describe(e));
+                return null;
             }
+            if (isTransient(e)) {
+                chat.append(ChatModel.Role.ERROR, "请求超时或网络中断(当前对话上下文很大,"
+                        + "服务商处理较慢)。可再发一次重试;若反复出现,点「新对话」缩短上下文后会明显变快。");
+                return null;
+            }
+            chat.append(ChatModel.Role.ERROR, "模型请求失败: "
+                    + (e.getMessage() == null ? String.valueOf(e) : e.getMessage()));
             return null;
         }
     }
+
 
     /** 瞬时故障判断:超时/连接类异常(上下文大时服务商处理慢,值得自动重试)。 */
     private static boolean isTransient(Throwable t) {
@@ -424,15 +458,6 @@ public final class AgentEngine {
             }
         }
         return false;
-    }
-
-    /** 异常 → 玩家能看懂的中文(超时给上下文相关提示)。 */
-    private static String describe(Throwable t) {
-        if (isTransient(t)) {
-            return "请求超时或网络中断(当前对话上下文很大,服务商处理较慢)。"
-                    + "可再发一次重试;若反复出现,点「新对话」缩短上下文后会明显变快。";
-        }
-        return String.valueOf(t.getMessage() == null ? t : t.getMessage());
     }
 
     /** 执行单个工具调用,永不抛出(任何异常都转成中文错误文本回填给模型)。 */

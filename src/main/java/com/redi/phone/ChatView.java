@@ -996,9 +996,7 @@ final class ChatView {
             }
             if (newHovered) {
                 // 新对话:清空显示记录 + 重置发给模型的上下文(下次存档开新会话文件)
-                ChatModel.get().clear();
-                AgentEngine.get().resetConversation();
-                com.redi.agent.ChatStore.markNewSession();
+                AgentEngine.newChat(); // 新会话(新上下文+新档;旧会话若在跑不受影响)
                 pinned = true;
                 scroll = 0;
                 return true;

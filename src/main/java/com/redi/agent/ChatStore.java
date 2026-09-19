@@ -97,6 +97,11 @@ public final class ChatStore {
      */
     public static synchronized void saveCurrent() {
         try {
+            AgentSession cur = AgentEngine.currentSession();
+            if (cur != null) {
+                saveSession(cur); // 多会话:保存当前会话
+                return;
+            }
             List<ChatModel.Msg> snap = ChatModel.get().snapshot();
             if (snap.isEmpty()) {
                 return;
@@ -122,6 +127,42 @@ public final class ChatStore {
             revision++;
         } catch (Exception e) {
             LOG.warn("[redi] 保存历史会话失败: {}", e.toString());
+        }
+    }
+
+    /** 分配一个新会话文件名(不写内容;多会话架构下按需创建)。 */
+    public static synchronized String newSessionFile() {
+        try {
+            Files.createDirectories(DIR);
+        } catch (Exception ignored) {
+        }
+        return uniqueFile().getFileName().toString();
+    }
+
+    /** 保存指定会话(原地更新其文件;fileName 为空时分配新文件)。多会话架构用。 */
+    public static synchronized void saveSession(AgentSession session) {
+        try {
+            if (session.fileName == null || session.fileName.isBlank()) {
+                session.fileName = newSessionFile();
+            }
+            Stored s = new Stored();
+            s.title = deriveTitle(session.chat().snapshot());
+            s.savedAt = System.currentTimeMillis();
+            s.messages = new ArrayList<>();
+            for (ChatModel.Msg m : session.chat().snapshot()) {
+                StoredMsg sm = new StoredMsg();
+                sm.role = (m.role() == null ? ChatModel.Role.NOTE : m.role()).name();
+                sm.text = m.text() == null ? "" : m.text();
+                sm.ts = m.ts();
+                s.messages.add(sm);
+            }
+            s.rounds = storeRounds(session.snapshotRounds());
+            Files.createDirectories(DIR);
+            Path target = safeResolve(session.fileName);
+            Files.writeString(target != null ? target : uniqueFile(), GSON.toJson(s), StandardCharsets.UTF_8);
+            revision++;
+        } catch (Exception e) {
+            LOG.warn("[redi] 保存会话失败: {}", e.toString());
         }
     }
 
@@ -170,8 +211,9 @@ public final class ChatStore {
         loadIntoInternal(fileName, false);
     }
 
-    /** loadInto 的实现:quiet=true 时不追加“已载入”提示(启动自动恢复用)。 */
-    private static synchronized void loadIntoInternal(String fileName, boolean quiet) {        try {
+    /** loadInto 实现:quiet=true 不加提示(启动自动恢复用)。 */
+    private static synchronized void loadIntoInternal(String fileName, boolean quiet) {
+        try {
             Path p = safeResolve(fileName);
             if (p == null) {
                 return;
@@ -187,19 +229,17 @@ public final class ChatStore {
                 }
                 msgs.add(new ChatModel.Msg(parseRole(sm.role), sm.text == null ? "" : sm.text, sm.ts));
             }
-            ChatModel.get().replaceAll(msgs);
-            // 回灌结构化上下文:切到历史会话后模型“记得”这段对话,说“继续”能接上。
-            // 任务进行中不回灌(避免污染正在跑的任务的上下文)
-            if (!ChatModel.get().busy()) {
-                AgentEngine.get().restoreRounds(loadRounds(s.rounds), quiet);
+            // 多会话:切换(或复用)会话——运行中的会话原样继续,只切显示;
+            // 空闲会话回灌模型上下文(说"继续"能接上)
+            AgentSession session = AgentEngine.switchSession(fileName, msgs, loadRounds(s.rounds));
+            if (!quiet && !session.busy()) {
+                session.chat().append(ChatModel.Role.NOTE,
+                        "已载入历史会话(模型上下文已恢复),可以直接\"继续\"。");
             }
-            // 之后继续写回该会话文件(原地更新)
-            currentFile = p;
         } catch (Exception e) {
             LOG.warn("[redi] 读取历史会话失败: {}", e.toString());
         }
     }
-
     /** 删除会话文件(只删文件,不动当前显示记录);非法文件名或删除失败静默忽略。 */
     public static synchronized void delete(String fileName) {
         try {

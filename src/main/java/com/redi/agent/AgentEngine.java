@@ -2,75 +2,306 @@ package com.redi.agent;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.redi.config.AgentConfig;
-import com.redi.llm.LlmClient;
 import com.redi.llm.LlmMessage;
-import com.redi.llm.ToolCall;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
- * Agent 引擎:接收玩家任务 → 组装系统提示与工具 → LLM 工具调用循环 → 结果写回
- * {@link ChatModel}。全部异步,UI 只管读 ChatModel。
+ * 引擎门面(facade):多会话管理 + 跨会话静态算法。
  *
- * <p>引擎用固定单线程 Executor 排队执行。发给模型的对话历史按“轮”组织
- * (一轮 = 一条 user,或一条 assistant(含 tool_calls)加上它的全部 tool 结果),
- * 历史不设本地上限、全量发送(玩家要求);只有服务商因超出其上下文窗口返回 400 时,
- * 才由 {@link #trimRoundsForProvider()} 自适配裁剪兜底。system 每次请求重建,不占历史槽位。</p>
- *
- * <p>健壮性:模型返回空内容(无工具调用且无文本)时用相同请求自动重试一次,
- * 再空则以 NOTE 提示玩家,绝不静默结束;同一“工具+参数”连续重复到第 3 次
- * 不再真正执行,直接提示模型基于已有信息作答,防止空转;被 max_tokens 掐断的回答
- * 自动发“继续”接写。每个工具执行期间会在 ChatModel 上更新活动描述供手机界面展示。</p>
+ * <ul>
+ *   <li><b>会话</b>:每个会话是独立的 {@link AgentSession}(自己的上下文/线程/显示模型),
+ *       切换历史只切 {@link ChatModel#setActive 显示指针},运行中的会话在后台继续;</li>
+ *   <li><b>子 agent</b>:{@link #spawnSubagent} 创建临时会话(不落盘)执行子任务,
+ *       由 spawn_task 工具触发,父会话取消时联动取消子会话;</li>
+ *   <li><b>静态算法</b>:系统提示词、上下文整形(compaction)、400 裁剪、
+ *       工具中文标注等所有会话共用。</li>
+ * </ul>
  */
 public final class AgentEngine {
 
     private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger("redi");
-    private static final AgentEngine INSTANCE = new AgentEngine();
 
-    /** 同一“工具+参数”签名连续出现到第几次时跳过真正执行。 */
-    private static final int REPEAT_SKIP_AT = 3;
+    /** 文件名 → 主会话(历史会话按需装载,运行中切换不销毁)。 */
+    private static final java.util.Map<String, AgentSession> BY_FILE = new java.util.concurrent.ConcurrentHashMap<>();
+    /** 当前交互(显示)的主会话。 */
+    private static volatile AgentSession current = AgentSession.mainSession();
+    /** 活跃子 agent(取消传播/状态查询)。 */
+    private static final java.util.List<AgentSession> SUBAGENTS = new java.util.concurrent.CopyOnWriteArrayList<>();
 
-    public static AgentEngine get() {
-        return INSTANCE;
+    static {
+        ChatModel.setActive(current.chat());
     }
 
     private AgentEngine() {
     }
 
-    /** 引擎单线程:LLM 请求与工具执行都在这里排队跑。 */
-    private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "redi-engine");
-        t.setDaemon(true);
-        return t;
-    });
+    /** 兼容旧接口(ChatView 等持有者):返回门面自身。 */
+    public static AgentEngine get() {
+        return new AgentEngine();
+    }
 
-    /** 对话历史(不含 system),按轮组织;引擎线程写,读取处加锁。 */
-    private final ArrayDeque<List<LlmMessage>> rounds = new ArrayDeque<>();
+    // ---------------------------------------------------------------- 会话管理
 
-    /** 取消标志:工具循环每轮、每个工具调用前检查。 */
-    private volatile boolean cancelled = false;
+    /** 当前交互的主会话。 */
+    public static AgentSession currentSession() {
+        return current;
+    }
 
-    /** 当前任务在用的 LLM 客户端(cancel 时即时打断在途 HTTP 请求)。 */
-    private volatile com.redi.llm.LlmClient activeClient;
+    /** 提交到当前会话(ChatView 发送入口)。 */
+    public void submit(String userText) {
+        current.submit(userText, userText);
+    }
 
-    /** 本任务内“工具+参数”签名 → 出现次数(引擎线程内访问,无需并发保护;新任务清空)。 */
-    private final java.util.HashMap<String, Integer> sigCounts = new java.util.HashMap<>();
+    public void submit(String displayText, String taskText) {
+        current.submit(displayText, taskText);
+    }
 
-    /** 当前任务原文(buildRequest 兜底补 user 开头用,引擎线程内访问)。 */
-    private String currentTask = "";
+    /** 停止当前会话任务,并联动停止全部子 agent。 */
+    public void cancel() {
+        current.cancel();
+        for (AgentSession s : SUBAGENTS) {
+            s.cancel();
+        }
+    }
 
-    /** 当前环境是否允许作弊(单人开局开作弊 / 多人服务器有 OP 权限);任务开始时探测。 */
-    private volatile boolean cheatsAllowed = false;
+    /** 当前会话开新对话。 */
+    public void resetConversation() {
+        current.newConversation();
+    }
 
-    /** 工具名的中文标注(UI 展示用:调用工具时在名字后面加括号给玩家看)。 */
+    /** 当前会话上下文快照(ChatStore 旧接口)。 */
+    public List<List<LlmMessage>> snapshotRounds() {
+        return current.snapshotRounds();
+    }
+
+    /** 当前会话回灌上下文。 */
+    public void restoreRounds(List<List<LlmMessage>> restored, boolean quiet) {
+        current.restoreRounds(restored);
+        if (!quiet) {
+            current.chat().append(ChatModel.Role.NOTE, "已载入历史会话,模型上下文已恢复。");
+        }
+    }
+
+    /**
+     * 切换(或装载)一个历史会话为当前会话:复用已注册会话(运行中的原样继续,
+     * 只切显示),否则从文件装载(显示记录 + 空闲时回灌上下文)。
+     */
+    public static AgentSession switchSession(String fileName, List<ChatModel.Msg> msgs,
+                                             List<List<LlmMessage>> rounds) {
+        AgentSession s = BY_FILE.get(fileName);
+        if (s == null) {
+            s = AgentSession.mainSession();
+            s.fileName = fileName;
+            s.chat().replaceAll(msgs == null ? List.of() : msgs);
+            s.restoreRounds(rounds);
+            BY_FILE.put(fileName, s);
+        }
+        current = s;
+        ChatModel.setActive(s.chat());
+        return s;
+    }
+
+    /** 「新对话」:切到空白新会话(旧会话若在运行,后台继续)。 */
+    public static void newChat() {
+        freshSession();
+    }
+
+    /** 新建空白主会话为当前(「新对话」后开新档用)。 */
+    public static AgentSession freshSession() {
+        AgentSession s = AgentSession.mainSession();
+        current = s;
+        ChatModel.setActive(s.chat());
+        return s;
+    }
+
+    /** 任务结束回调(会话线程 finally):存档 + 全局事件。 */
+    static void onTaskFinished(AgentSession session, String task) {
+        try {
+            if (session.fileName == null) {
+                session.fileName = ChatStore.newSessionFile();
+            }
+            ChatStore.saveSession(session);
+        } catch (Exception e) {
+            LOG.warn("[redi] 会话存档失败: {}", e.toString());
+        }
+        com.redi.plugin.AgentContext.SHARED.emit("task.finished", task);
+    }
+
+    // ---------------------------------------------------------------- 子 agent
+
+    /**
+     * 派一个子 agent(临时会话,干净上下文)执行子任务并等待其完成,返回最终回答。
+     * parent 非空时:父取消 → 联动取消子。超时上限 15 分钟。
+     */
+    public static String spawnSubagent(String task, AgentSession parent) {
+        AgentSession sub = AgentSession.transientSession();
+        SUBAGENTS.add(sub);
+        try {
+            sub.submit(task, task);
+            long deadline = System.currentTimeMillis() + 15 * 60_000L;
+            while (sub.busy() && System.currentTimeMillis() < deadline) {
+                if (parent != null && parent.isCancelled()) {
+                    sub.cancel(); // 父会话被停止:联动停子
+                }
+                try {
+                    Thread.sleep(300);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    sub.cancel();
+                    break;
+                }
+            }
+            if (sub.busy()) {
+                sub.cancel();
+                return "子 agent 超时(15 分钟)已停止。";
+            }
+            String answer = sub.lastAnswer();
+            if (answer.isBlank()) {
+                return "子 agent 没有产生最终回答(可能被停止或模型空响应)。";
+            }
+            return answer;
+        } finally {
+            SUBAGENTS.remove(sub);
+        }
+    }
+
+    // ---------------------------------------------------------------- 上下文整形(compaction)
+
+    /** 软预算:请求体超过此字符数才启用剪枝(平时零干预,历史全量)。 */
+    private static final int SHAPE_SOFT_CHARS = 120_000;
+    /** 硬预算:剪枝后仍超,从最老开始丢整轮(绝不越过最近一条用户轮)。 */
+    private static final int SHAPE_HARD_CHARS = 300_000;
+    /** 最近 N 轮永远完整(过程细节保留)。 */
+    private static final int SHAPE_KEEP_RECENT = 6;
+
+    /**
+     * 上下文整形(不改 rounds,返回发送副本):
+     * ①超出软预算:较早轮次的工具结果替换为存根(用户提问/最终回答/最近 6 轮完整);
+     * ②仍超硬预算:从最老丢整轮(不越过最近用户轮)。
+     */
+    static List<LlmMessage> shapeForRequest(List<List<LlmMessage>> roundsIn, String currentTask) {
+        List<List<LlmMessage>> rounds = new ArrayList<>();
+        for (List<LlmMessage> r : roundsIn) {
+            rounds.add(new ArrayList<>(r));
+        }
+        long total = 0;
+        for (List<LlmMessage> r : rounds) {
+            for (LlmMessage m : r) {
+                total += m.content() == null ? 0 : m.content().length();
+            }
+        }
+        if (total <= SHAPE_SOFT_CHARS) {
+            return assemble(rounds, currentTask); // 平时零干预
+        }
+        int userAnchor = -1;
+        for (int i = rounds.size() - 1; i >= 0; i--) {
+            if (!rounds.get(i).isEmpty() && rounds.get(i).get(0).role().equals("user")) {
+                userAnchor = i;
+                break;
+            }
+        }
+        int keepFrom = Math.max(0, rounds.size() - SHAPE_KEEP_RECENT);
+        long pruned = 0;
+        int prunedRounds = 0;
+        for (int i = 0; i < keepFrom && i < rounds.size(); i++) {
+            List<LlmMessage> r = rounds.get(i);
+            if (r.isEmpty()) {
+                continue;
+            }
+            String toolNames = null;
+            for (LlmMessage m : r) {
+                if (m.toolCalls() != null && !m.toolCalls().isEmpty()) {
+                    StringBuilder names = new StringBuilder();
+                    for (com.redi.llm.ToolCall tc : m.toolCalls()) {
+                        if (names.length() > 0) {
+                            names.append('/');
+                        }
+                        names.append(tc.name());
+                    }
+                    toolNames = names.toString();
+                }
+                if ("tool".equals(m.role()) && m.content() != null && m.content().length() > 200) {
+                    String stub = "[已归档" + (toolNames != null ? ":" + toolNames : "")
+                            + "](原 " + m.content().length() + " 字符,过程数据已消费。"
+                            + "开头摘要: " + m.content().substring(0, Math.min(60, m.content().length())) + "…)";
+                    pruned += m.content().length() - stub.length();
+                    r.set(r.indexOf(m), LlmMessage.tool(m.toolCallId(), stub));
+                    prunedRounds++;
+                }
+            }
+        }
+        total = 0;
+        for (List<LlmMessage> r : rounds) {
+            for (LlmMessage m : r) {
+                total += m.content() == null ? 0 : m.content().length();
+            }
+        }
+        int dropTo = 0;
+        while (total > SHAPE_HARD_CHARS && dropTo < rounds.size() - 1
+                && (userAnchor < 0 || dropTo < userAnchor)) {
+            for (LlmMessage m : rounds.get(dropTo)) {
+                total -= m.content() == null ? 0 : m.content().length();
+            }
+            dropTo++;
+        }
+        if (dropTo > 0) {
+            rounds.subList(0, dropTo).clear();
+        }
+        if (prunedRounds > 0 || dropTo > 0) {
+            LOG.info("[redi] 上下文整形: 归档 {} 轮工具细节(省 {} 字符), 移除最老 {} 轮",
+                    prunedRounds, pruned, dropTo);
+        }
+        return assemble(rounds, currentTask);
+    }
+
+    /** 400 自适配裁剪:保留最近一半轮次(左边界不越过最近用户轮)。 */
+    static void trimRoundsForProvider(ArrayDeque<List<LlmMessage>> rounds) {
+        synchronized (rounds) {
+            java.util.List<java.util.List<LlmMessage>> snap = new java.util.ArrayList<>(rounds);
+            int n = snap.size();
+            int userAnchor = -1;
+            for (int i = n - 1; i >= 0; i--) {
+                List<LlmMessage> r = snap.get(i);
+                if (!r.isEmpty() && r.get(0).role().equals("user")) {
+                    userAnchor = i;
+                    break;
+                }
+            }
+            int start = Math.max(0, n - Math.max(1, n / 2));
+            if (userAnchor >= 0 && userAnchor < start) {
+                start = userAnchor;
+            }
+            while (rounds.size() > n - start && rounds.size() > 1) {
+                rounds.pollFirst();
+            }
+        }
+    }
+
+    /** system + 轮次序列(保证 user 开头)。 */
+    static List<LlmMessage> assemble(List<List<LlmMessage>> rounds, String currentTask) {
+        List<LlmMessage> out = new ArrayList<>();
+        out.add(LlmMessage.system(buildSystemPrompt()));
+        boolean empty = true;
+        for (List<LlmMessage> r : rounds) {
+            if (empty && !r.isEmpty() && !r.get(0).role().equals("user")) {
+                out.add(LlmMessage.user(currentTask == null || currentTask.isBlank() ? "(继续)" : currentTask));
+            }
+            empty = false;
+            out.addAll(r);
+        }
+        if (empty) {
+            out.add(LlmMessage.user(currentTask == null || currentTask.isBlank() ? "(继续)" : currentTask));
+        }
+        return out;
+    }
+
+    // ---- 以下为从旧引擎原样保留的共用静态成员(由拼接脚本注入) ----
+
     private static final Map<String, String> TOOL_ZH = buildToolZh();
 
     private static Map<String, String> buildToolZh() {
@@ -92,6 +323,7 @@ public final class AgentEngine {
         m.put("mod_overview", "模组速览");
         m.put("send_chat", "发聊天");
         m.put("send_command", "执行指令");
+        m.put("spawn_task", "派子agent");
         m.put("read_guidebook", "读模组手册");
         m.put("read_file", "读本机文件");
         m.put("list_files", "列目录");
@@ -102,352 +334,12 @@ public final class AgentEngine {
     }
 
     /** 工具显示名:name(中文标注);未登记的工具返回原名。 */
-    private static String toolLabel(String name) {
+    static String toolLabel(String name) {
         String zh = TOOL_ZH.get(name);
         return zh == null ? name : name + "(" + zh + ")";
     }
 
-    /** 提交一条玩家消息,异步执行;状态与结果都反映在 ChatModel 上。 */
-    public void submit(String userText) {
-        submit(userText, userText);
-    }
-
-    /**
-     * 提交(显示文本与任务文本可不同):@文件导入用 —— 聊天气泡显示玩家原文,
-     * 发给引擎的任务文本附带文件内容(见 {@link com.redi.tools.FileImport})。
-     */
-    public void submit(String displayText, String taskText) {
-        ChatModel chat = ChatModel.get();
-        if (chat.busy()) {
-            chat.append(ChatModel.Role.NOTE, "上一个任务还在进行中,请等它结束或点「■」停止。");
-            return;
-        }
-        if (taskText == null || taskText.isBlank()) return;
-        String text = taskText.trim();
-        chat.append(ChatModel.Role.USER, displayText == null || displayText.isBlank() ? text : displayText.trim());
-        if (!AgentConfig.get().isConfigured()) {
-            chat.append(ChatModel.Role.ERROR,
-                    "尚未配置模型接口。请点右上角齿轮进设置,填好 base_url、API Key 和模型名。");
-            return;
-        }
-        cancelled = false;
-        sigCounts.clear();
-        chat.setBusy(true);
-        executor.execute(() -> runTask(text));
-    }
-
-    /** 请求中止当前任务:即时打断在途 LLM 请求 + 工具循环逐轮退出。 */
-    public void cancel() {
-        cancelled = true;
-        com.redi.llm.LlmClient c = activeClient;
-        if (c != null) {
-            c.abortInFlight();
-        }
-    }
-
-    /** 开启新对话(清空发给模型的上下文;不清显示记录)。 */
-    public void resetConversation() {
-        synchronized (rounds) {
-            rounds.clear();
-        }
-        ChatModel.get().append(ChatModel.Role.NOTE, "已开启新对话(模型记忆已清空,聊天记录保留)。");
-    }
-
-    /**
-     * 结构化对话历史深拷贝快照(会话存档用:切换历史会话时回灌,模型才能“记得”那段对话)。
-     */
-    public List<List<LlmMessage>> snapshotRounds() {
-        synchronized (rounds) {
-            List<List<LlmMessage>> out = new ArrayList<>(rounds.size());
-            for (List<LlmMessage> r : rounds) {
-                out.add(new ArrayList<>(r));
-            }
-            return out;
-        }
-    }
-
-    /** 回灌历史会话的结构化上下文(rounds 为空/旧格式存档则不动当前上下文);quiet=不追加提示(自动恢复用)。 */
-    public void restoreRounds(List<List<LlmMessage>> restored, boolean quiet) {
-        if (restored == null || restored.isEmpty()) {
-            return;
-        }
-        synchronized (rounds) {
-            rounds.clear();
-            for (List<LlmMessage> r : restored) {
-                if (r != null && !r.isEmpty()) {
-                    rounds.addLast(new ArrayList<>(r));
-                }
-            }
-        }
-        if (!quiet) {
-            ChatModel.get().append(ChatModel.Role.NOTE,
-                    "已载入历史会话,模型上下文已恢复(" + restored.size() + " 轮),可以直接“继续”。");
-        }
-    }
-
-    /** 回灌并显示提示(历史列表手动载入用)。 */
-    public void restoreRounds(List<List<LlmMessage>> restored) {
-        restoreRounds(restored, false);
-    }
-
-    // ------------------------------------------------------------------
-
-    /** 引擎主流程:工具调用循环。在引擎线程执行。 */
-    private void runTask(String userText) {
-        ChatModel chat = ChatModel.get();
-        AgentConfig cfg = AgentConfig.get();
-        try {
-            if (!cfg.isConfigured()) {
-                chat.append(ChatModel.Role.ERROR, "尚未配置模型接口,无法执行。");
-                return;
-            }
-            // 新任务清空“重复调用”计数
-            sigCounts.clear();
-            currentTask = userText;
-            chat.setTaskStart(System.currentTimeMillis());
-            // 每次执行第一件事:判断环境是否允许作弊(单人开局开作弊 / 多人 OP)
-            try {
-                Class<?> mc = Class.forName("net.minecraft.client.Minecraft");
-                Object inst = mc.getMethod("getInstance").invoke(null);
-                Object player = inst.getClass().getField("player").get(inst);
-                cheatsAllowed = player != null && (Boolean) player.getClass()
-                        .getMethod("hasPermissions", int.class).invoke(player, 2);
-            } catch (Throwable notInGame) {
-                cheatsAllowed = false; // 无头/不可用环境:按无权限处理
-            }
-            synchronized (rounds) {
-                rounds.addLast(List.of(LlmMessage.user(userText)));
-            }
-            LlmClient client = new LlmClient(cfg);
-            activeClient = client;
-            // 步数不设限(玩家明确要求无限):任务一直跑到模型自己说完、或玩家按「■」停止;
-            // settings 里 maxToolIterations > 0 时才启用自定义上限
-            int hardCap = cfg.maxToolIterations > 0 ? cfg.maxToolIterations : Integer.MAX_VALUE;
-            List<String> think = new ArrayList<>();
-            for (int iter = 0; ; iter++) {
-                if (cancelled) {
-                    chat.append(ChatModel.Role.NOTE, "已停止。");
-                    return;
-                }
-                if (iter >= hardCap) {
-                    chat.append(ChatModel.Role.NOTE,
-                            "任务步数过多,已暂停;可以继续追问或开新对话。");
-                    return;
-                }
-                chat.setActivity("思考中…");
-                LlmClient.Response resp = request(client, chat);
-                if (resp == null) return; // 请求失败,已在 request() 里向玩家报错
-                // 模型的原始思考文本(reasoning_content)实时进思考块,像主流 agent 一样可展开回看
-                String reasoning = resp.reasoning() == null ? "" : resp.reasoning().trim();
-                if (!reasoning.isEmpty()) {
-                    if (think.isEmpty()) {
-                        chat.beginThink();
-                    }
-                    chat.addThinkStep("思考:" + reasoning);
-                    think.add("思考:" + reasoning);
-                }
-                String content = resp.content() == null ? "" : resp.content().trim();
-                if (!resp.hasToolCalls() && content.isEmpty()) {
-                    // 空响应。若因 length 截断(思考配额挤压)→ 扩容配额再试;否则同请求重试
-                    if (resp.truncatedByLength() && client.bumpMaxTokens()) {
-                        chat.setActivity("模型思考较长,已扩大输出配额重试…");
-                        resp = request(client, chat);
-                        if (resp == null) return;
-                        content = resp.content() == null ? "" : resp.content().trim();
-                    }
-                    if (!resp.hasToolCalls() && content.isEmpty()) {
-                        resp = request(client, chat);
-                        if (resp == null) return;
-                        content = resp.content() == null ? "" : resp.content().trim();
-                    }
-                    if (!resp.hasToolCalls() && content.isEmpty()) {
-                        chat.append(ChatModel.Role.NOTE,
-                                "模型没有返回内容,已自动重试仍为空。请换个说法再试,或点「■」停止。");
-                        return;
-                    }
-                }
-                if (!resp.hasToolCalls()) {
-                    // 没有工具调用 = 模型给出最终回答。被 max_tokens 掐断(length)时不结束:
-                    // 把已生成的部分照常上屏,再补一条“继续”用户轮接着写,直到真正写完
-                    if (!think.isEmpty()) {
-                        chat.endThink();
-                        think.clear();
-                    }
-                    if (!content.isEmpty()) {
-                        chat.append(ChatModel.Role.ASSISTANT, content);
-                    }
-                    addRound(List.of(LlmMessage.assistant(content, null)));
-                    if (!resp.truncatedByLength()) {
-                        return;
-                    }
-                    client.bumpMaxTokens(); // 续写请求给更大配额
-                    chat.setActivity("回答被截断,自动续写…");
-                    addRound(List.of(LlmMessage.user(
-                            "(继续:刚才的回答因长度被截断,从中断处接着输出,不要重复已经说过的内容;完成即停)")));
-                    continue;
-                }
-                // 一轮 = assistant(含 tool_calls) + 每个 call 对应的 tool 结果
-                List<LlmMessage> round = new ArrayList<>();
-                round.add(LlmMessage.assistant(content, resp.toolCalls()));
-                for (ToolCall call : resp.toolCalls()) {
-                    if (cancelled) {
-                        // 消息序列要保持合法:每个 tool_call 都必须有 tool 结果
-                        round.add(LlmMessage.tool(call.id(), "(玩家已停止本任务)"));
-                        continue;
-                    }
-                    if (think.isEmpty()) {
-                        chat.beginThink(); // 第一个工具调用时插入实时思考块
-                    }
-                    chat.setActivity("调用 " + toolLabel(call.name()) + "…");
-                    String out = runTool(call);
-                    chat.addThinkStep(toolLabel(call.name()) + (out.startsWith("工具执行出错") ? " ✗" : " ✓"));
-                    think.add(toolLabel(call.name()) + (out.startsWith("工具执行出错") ? " ✗" : " ✓"));
-                    com.redi.plugin.AgentContext.SHARED.emit("tool.called",
-                            call.name() + "|" + (out.startsWith("工具执行出错") ? "err" : "ok"));
-                    round.add(LlmMessage.tool(call.id(), out));
-                }
-                addRound(round);
-            }
-        } finally {
-            chat.setActivity("");
-            chat.endThink();
-            chat.setBusy(false);
-            chat.clearTaskStart();
-            // 任务结束事件:存档等后续逻辑由插件监听执行(会话持久化插件)
-            com.redi.plugin.AgentContext.SHARED.emit("task.finished", userText);
-        }
-    }
-
-    /**
-     * 发一次请求;失败时向玩家报错并返回 null。
-     * 400(服务商对超长/超深对话的消息校验限制)→ 裁掉最早的一半轮次后自动重试一次。
-     * 瞬时故障(超时/连接中断)→ 自动重试一次(上下文很大时服务商处理可能超过一分钟)。
-     */
-    /** 流式调用 + 思考缓冲定稿(所有请求路径共用)。 */
-    private LlmClient.Response streamChat(LlmClient client, ChatModel chat) throws Exception {
-        try {
-            return client.chat(buildRequest(), ToolRegistry.schemas(), new LlmClient.StreamListener() {
-                @Override
-                public void onReasoning(String delta) {
-                    chat.streamThink(delta);
-                }
-            });
-        } finally {
-            chat.flushStream(); // 流式思考缓冲定稿
-        }
-    }
-
-    /**
-     * 发一次请求;失败时向玩家报错并返回 null。
-     * 主路径 = 流式。失败分流:
-     * ①服务商拒绝当前 max_tokens(400 含 max_tokens 字样)→ 还原默认配额立即重试一次;
-     * ②瞬时故障(超时/连接中断)→ 自动重试一次;
-     * ③其余 400 → 交给外层自适应链(裁剪/回显切换)。
-     */
-    /**
-     * 发一次请求;失败时向玩家报错并返回 null。主路径 = 流式。失败分流:
-     * ①max_tokens 被服务商拒绝(400 含 max_tokens)→ 还原默认配额立即重试一次;
-     * ②瞬时故障(超时/连接中断)→ 自动重试一次;
-     * ③其余 400 → 外层自适应链(裁剪/回显切换);
-     * ④其它 → 中文错误。
-     */
-    private LlmClient.Response request(LlmClient client, ChatModel chat) {
-        try {
-            try {
-                return streamChat(client, chat);
-            } catch (Exception first) {
-                // ①max_tokens 被服务商拒绝(配额超上限):还原默认配额立即重试一次
-                if (first instanceof com.redi.llm.LlmClient.BadRequestException
-                        && String.valueOf(first.getMessage()).toLowerCase(java.util.Locale.ROOT).contains("max_tokens")
-                        && client.resetMaxTokens()) {
-                    return streamChat(client, chat);
-                }
-                // ②瞬时故障(超时/连接中断):自动重试一次
-                if (!cancelled && isTransient(first)) {
-                    chat.setActivity("请求超时(上下文较大处理较慢),自动重试…");
-                    Thread.sleep(800);
-                    if (!cancelled) {
-                        return streamChat(client, chat);
-                    }
-                }
-                throw first; // 交给外层:BadRequest → 自适应链;其它 → 错误上报
-            }
-        } catch (com.redi.llm.LlmClient.BadRequestException e) {
-            // ---- 400 自适应重试(全程备份,失败即恢复原对话,不污染后续) ----
-            java.util.List<java.util.List<LlmMessage>> backup;
-            synchronized (rounds) {
-                backup = new java.util.ArrayList<>(rounds);
-            }
-            try {
-                trimRoundsForProvider();
-                if (cancelled) {
-                    chat.append(ChatModel.Role.NOTE, "已停止。");
-                    return null;
-                }
-                return client.chat(buildRequest(), ToolRegistry.schemas());
-            } catch (Exception e1) {
-                // ①失败:恢复完整历史,切换回显格式
-                synchronized (rounds) {
-                    rounds.clear();
-                    rounds.addAll(backup);
-                }
-                client.echoToolCallContent = !client.echoToolCallContent;
-            }
-            try {
-                if (cancelled) {
-                    chat.append(ChatModel.Role.NOTE, "已停止。");
-                    return null;
-                }
-                return client.chat(buildRequest(), ToolRegistry.schemas());
-            } catch (com.redi.llm.LlmClient.BadRequestException e2) {
-                // ②仍 400:恢复完整历史 + 裁剪 + 翻回格式
-                synchronized (rounds) {
-                    rounds.clear();
-                    rounds.addAll(backup);
-                    trimRoundsForProvider();
-                }
-                client.echoToolCallContent = !client.echoToolCallContent;
-                try {
-                    if (cancelled) {
-                        chat.append(ChatModel.Role.NOTE, "已停止。");
-                        return null;
-                    }
-                    return client.chat(buildRequest(), ToolRegistry.schemas());
-                } catch (Exception e4) {
-                    if (cancelled) {
-                        chat.append(ChatModel.Role.NOTE, "已停止。");
-                    } else {
-                        chat.append(ChatModel.Role.ERROR, "模型请求失败(已尝试格式切换与上下文裁剪): " + e4.getMessage());
-                    }
-                    return null;
-                }
-            } catch (Exception e3) {
-                if (cancelled) {
-                    chat.append(ChatModel.Role.NOTE, "已停止。");
-                } else {
-                    chat.append(ChatModel.Role.ERROR, "模型请求失败: " + e3.getMessage());
-                }
-                return null;
-            }
-        } catch (Exception e) {
-            if (cancelled) {
-                chat.append(ChatModel.Role.NOTE, "已停止。");
-                return null;
-            }
-            if (isTransient(e)) {
-                chat.append(ChatModel.Role.ERROR, "请求超时或网络中断(当前对话上下文很大,"
-                        + "服务商处理较慢)。可再发一次重试;若反复出现,点「新对话」缩短上下文后会明显变快。");
-                return null;
-            }
-            chat.append(ChatModel.Role.ERROR, "模型请求失败: "
-                    + (e.getMessage() == null ? String.valueOf(e) : e.getMessage()));
-            return null;
-        }
-    }
-
-
-    /** 瞬时故障判断:超时/连接类异常(上下文大时服务商处理慢,值得自动重试)。 */
-    private static boolean isTransient(Throwable t) {
+    static boolean isTransient(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
             String n = c.getClass().getSimpleName();
             String m = String.valueOf(c.getMessage()).toLowerCase(java.util.Locale.ROOT);
@@ -460,51 +352,12 @@ public final class AgentEngine {
         return false;
     }
 
-    /** 执行单个工具调用,永不抛出(任何异常都转成中文错误文本回填给模型)。 */
-    private String runTool(ToolCall call) {
-        AgentTool tool = ToolRegistry.byName(call.name());
-        if (tool == null) {
-            return "工具执行出错: 未知工具 " + call.name();
-        }
-        // 作弊门禁:环境未开放作弊权限时,拒绝执行任何指令(只能口头回答)
-        if ("send_command".equals(tool.name()) && !cheatsAllowed) {
-            return "当前环境未开放作弊权限(单人未开作弊或服务器无 OP),"
-                    + "无法执行任何指令。请改为口头回答:告诉玩家怎么手动完成,"
-                    + "不要再次尝试 send_command。";
-        }
-        ChatModel.get().setActivity("调用 " + toolLabel(tool.name()) + "…");
-        JsonObject args;
-        try {
-            String raw = call.argumentsJson();
-            args = JsonParser.parseString(raw == null || raw.isBlank() ? "{}" : raw).getAsJsonObject();
-        } catch (Exception e) {
-            return "工具执行出错: 参数不是合法 JSON(" + e.getMessage() + ")";
-        }
-        // 重复调用守卫:同一“工具+参数”在本任务内累计出现到第 3 次(不要求连续——
-        // 模型常在中间夹别的调用后回来重试同一失败调用)时,不再真正执行,
-        // 直接把提示文本回填给模型,逼它把失败原因告诉玩家而不是空转。
-        String sig = call.name() + "|" + canonicalArgs(args);
-        int n = sigCounts.merge(sig, 1, Integer::sum);
-        if (n >= REPEAT_SKIP_AT) {
-            return "(同一调用已失败/执行过 " + n + " 次,本次已跳过。不要再重复这个调用:"
-                    + "把失败原因与下一步建议直接告诉玩家,或改用其它方式完成任务)";
-        }
-        try {
-            String result = tool.execute(args);
-            return result == null || result.isEmpty() ? "(工具没有返回内容)" : result;
-        } catch (Throwable t) {
-            return "工具执行出错: " + t;
-        }
-    }
-
-    /** 参数规范化:键按字典序排序后的紧凑串,用于识别“完全相同”的重复调用。 */
-    private static String canonicalArgs(JsonObject args) {
+    static String canonicalArgs(JsonObject args) {
         StringBuilder sb = new StringBuilder();
         appendCanonical(args, sb);
         return sb.toString();
     }
 
-    /** 递归规范化 JSON 元素:对象键排序、数组保序、原始值直出。 */
     private static void appendCanonical(JsonElement el, StringBuilder sb) {
         if (el == null || el.isJsonNull()) {
             sb.append("null");
@@ -532,155 +385,8 @@ public final class AgentEngine {
         }
     }
 
-    private void addRound(List<LlmMessage> round) {
-        synchronized (rounds) {
-            rounds.addLast(round);
-        }
-    }
-
-    /**
-     * 400 时的自适配裁剪:保留最近一半轮次(左边界绝不越过最近一条用户轮)。
-     * 连续 400 时每次再减半,逐步逼近服务商能接受的大小——尽量多保留上下文,
-     * 而不是一刀切到几轮。完全是为对抗服务商上下文窗口的物理上限,平时不触发。
-     */
-    private void trimRoundsForProvider() {
-        synchronized (rounds) {
-            java.util.List<java.util.List<LlmMessage>> snap = new java.util.ArrayList<>(rounds);
-            int n = snap.size();
-            int userAnchor = -1;
-            for (int i = n - 1; i >= 0; i--) {
-                List<LlmMessage> r = snap.get(i);
-                if (!r.isEmpty() && r.get(0).role().equals("user")) {
-                    userAnchor = i;
-                    break;
-                }
-            }
-            int start = Math.max(0, n - Math.max(1, n / 2)); // 保留最近一半
-            if (userAnchor >= 0 && userAnchor < start) {
-                start = userAnchor; // 绝不越过最近一条用户轮(GLM 1214 要求 user 开头)
-            }
-            while (rounds.size() > n - start && rounds.size() > 1) {
-                rounds.pollFirst();
-            }
-        }
-    }
-
-    // ---- 上下文整形(借鉴 deepseek-harness 的 compaction 思路:剪枝优先,保结论剪过程)----
-    /** 软预算:请求体超过此字符数才启用剪枝(平时零干预,历史全量)。 */
-    private static final int SHAPE_SOFT_CHARS = 120_000;
-    /** 硬预算:剪枝后仍超,从最老开始丢整轮(绝不越过最近一条用户轮)。 */
-    private static final int SHAPE_HARD_CHARS = 300_000;
-    /** 最近 N 轮永远完整(过程细节保留)。 */
-    private static final int SHAPE_KEEP_RECENT = 6;
-
-    /**
-     * 上下文整形(不改 rounds,返回发送副本):
-     * ①超出软预算时,把「较早轮次」的 tool 结果替换为一行存根(用户提问/最终回答/最近 6 轮永远完整)
-     * ②仍超硬预算时,从最老开始丢整轮(不越过最近用户轮)。
-     * 工具结果是可再生的过程数据;问答结论永不丢失——这正是 harness 剪枝优先、摘要兜底的思路。
-     */
-    private List<LlmMessage> shapeForRequest(List<List<LlmMessage>> snap) {
-        List<List<LlmMessage>> rounds = new ArrayList<>();
-        for (List<LlmMessage> r : snap) rounds.add(new ArrayList<>(r));
-        long total = 0;
-        for (List<LlmMessage> r : rounds) {
-            for (LlmMessage m : r) total += m.content() == null ? 0 : m.content().length();
-        }
-        if (total <= SHAPE_SOFT_CHARS) {
-            return assemble(rounds); // 平时零干预
-        }
-        // 找最近一条用户轮(整形绝不越过它)
-        int userAnchor = -1;
-        for (int i = rounds.size() - 1; i >= 0; i--) {
-            if (!rounds.get(i).isEmpty() && rounds.get(i).get(0).role().equals("user")) {
-                userAnchor = i;
-                break;
-            }
-        }
-        int keepFrom = Math.max(0, rounds.size() - SHAPE_KEEP_RECENT);
-        long pruned = 0;
-        int prunedRounds = 0;
-        for (int i = 0; i < keepFrom && i < rounds.size(); i++) {
-            List<LlmMessage> r = rounds.get(i);
-            if (r.isEmpty()) continue;
-            String toolNames = null;
-            for (LlmMessage m : r) {
-                if (m.toolCalls() != null && !m.toolCalls().isEmpty()) {
-                    StringBuilder names = new StringBuilder();
-                    for (ToolCall tc : m.toolCalls()) {
-                        if (names.length() > 0) names.append('/');
-                        names.append(tc.name());
-                    }
-                    toolNames = names.toString();
-                }
-                if ("tool".equals(m.role()) && m.content() != null && m.content().length() > 200) {
-                    String stub = "[已归档" + (toolNames != null ? ":" + toolNames : "")
-                            + "](原 " + m.content().length() + " 字符,过程数据已消费。"
-                            + "开头摘要: " + m.content().substring(0, Math.min(60, m.content().length())) + "…)";
-                    pruned += m.content().length() - stub.length();
-                    rounds.get(i).set(r.indexOf(m), LlmMessage.tool(m.toolCallId(), stub));
-                    prunedRounds++;
-                }
-            }
-        }
-        // 硬预算兜底:从最老丢整轮(不越过用户锚)
-        total = 0;
-        for (List<LlmMessage> r : rounds) {
-            for (LlmMessage m : r) total += m.content() == null ? 0 : m.content().length();
-        }
-        int dropTo = 0;
-        while (total > SHAPE_HARD_CHARS && dropTo < rounds.size() - 1
-                && (userAnchor < 0 || dropTo < userAnchor)) {
-            for (LlmMessage m : rounds.get(dropTo)) {
-                total -= m.content() == null ? 0 : m.content().length();
-            }
-            dropTo++;
-        }
-        if (dropTo > 0) {
-            rounds.subList(0, dropTo).clear();
-        }
-        if (prunedRounds > 0 || dropTo > 0) {
-            LOG.info("[redi] 上下文整形: 归档 {} 轮工具细节(省 {} 字符), 移除最老 {} 轮",
-                    prunedRounds, pruned, dropTo);
-        }
-        return assemble(rounds);
-    }
-
-    /** system + 轮次序列(保证 user 开头)。 */
-    private List<LlmMessage> assemble(List<List<LlmMessage>> rounds) {
-        List<LlmMessage> out = new ArrayList<>();
-        out.add(LlmMessage.system(buildSystemPrompt()));
-        boolean empty = true;
-        for (List<LlmMessage> r : rounds) {
-            if (empty && !r.isEmpty() && !r.get(0).role().equals("user")) {
-                out.add(LlmMessage.user(currentTask == null || currentTask.isBlank() ? "(继续)" : currentTask));
-            }
-            empty = false;
-            out.addAll(r);
-        }
-        if (empty) {
-            out.add(LlmMessage.user(currentTask == null || currentTask.isBlank() ? "(继续)" : currentTask));
-        }
-        return out;
-    }
-
-    /**
-     * 组装本次请求消息:system(每次重建)+ 历史全部轮次(玩家要求:本地不设任何上下文上限,
-     * 历史全量发送;只有当服务商因超出其上下文窗口返回 400 时,才由 request() 的
-     * 自适配裁剪兜底,自动保留最近的轮次让对话继续,而不是报错中断)。
-     * 双保险保证 GLM 1214 的硬性要求——messages 以 user 开头。
-     */
-    private List<LlmMessage> buildRequest() {
-        List<List<LlmMessage>> snap;
-        synchronized (rounds) {
-            snap = new ArrayList<>();
-            for (List<LlmMessage> r : rounds) snap.add(new ArrayList<>(r));
-        }
-        return shapeForRequest(snap);
-    }
-
-    /** 系统提示:身份 + 按取证优先级分层的工具清单(由注册表自动生成,新插件自动进层)+ 硬性规则。 */
-    private String buildSystemPrompt() {
+    /** 系统提示:身份 + 分层工具清单 + 硬性规则(所有会话共用)。 */
+    static String buildSystemPrompt() {
         StringBuilder kb = new StringBuilder();
         StringBuilder mem = new StringBuilder();
         StringBuilder loc = new StringBuilder();
@@ -701,6 +407,7 @@ public final class AgentEngine {
             }
         }
         StringBuilder sb = new StringBuilder();
+        boolean cheatsAllowed = currentSession().isCheatsAllowed();
         sb.append(cheatsAllowed
                 ? "[环境状态: 允许作弊——玩家拥有指令权限,send_command 可正常使用。]\n"
                 : "[环境状态: 未开放作弊——无指令权限!禁止调用 send_command,"

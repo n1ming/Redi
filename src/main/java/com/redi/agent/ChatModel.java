@@ -19,7 +19,8 @@ public final class ChatModel {
         }
     }
 
-    private static final ChatModel INSTANCE = new ChatModel();
+    /** 当前显示的活动模型(多会话:每会话一个实例,切历史只切指针,运行中的会话不受干扰)。 */
+    private static volatile ChatModel activeModel = new ChatModel();
     private static final int MAX_MSGS = 300;
 
     private final ArrayDeque<Msg> msgs = new ArrayDeque<>();
@@ -149,11 +150,25 @@ public final class ChatModel {
     }
     private long seq = 0; // 每次渲染循环递增,UI 可用来决定是否重排
 
-    private ChatModel() {
+    public ChatModel() {
     }
 
     public static ChatModel get() {
-        return INSTANCE;
+        return activeModel;
+    }
+
+    /** 切换当前显示的会话模型(引擎切会话时调用)。 */
+    public static void setActive(ChatModel m) {
+        if (m != null) {
+            activeModel = m;
+        }
+    }
+
+    /** 倒序快照(取最后一条某角色消息用)。 */
+    public synchronized List<Msg> snapshotReversed() {
+        List<Msg> all = new ArrayList<>(msgs);
+        java.util.Collections.reverse(all);
+        return all;
     }
 
     public synchronized List<Msg> snapshot() {

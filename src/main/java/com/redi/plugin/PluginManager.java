@@ -2,9 +2,9 @@ package com.redi.plugin;
 
 import com.redi.plugin.builtin.ActionToolsPlugin;
 import com.redi.plugin.builtin.FileToolsPlugin;
+import com.redi.plugin.builtin.SubagentPlugin;
 import com.redi.plugin.builtin.LocalDocsPlugin;
 import com.redi.plugin.builtin.MemoryToolsPlugin;
-import com.redi.plugin.builtin.SessionPlugin;
 import com.redi.plugin.builtin.WebToolsPlugin;
 
 import java.util.ArrayList;
@@ -34,9 +34,9 @@ public final class PluginManager {
         l.add(new MemoryToolsPlugin());   // 第一优先:内存读取
         l.add(new LocalDocsPlugin());     // 第二优先:本地文档/知识库
         l.add(new FileToolsPlugin());     // 本机文件(玩家授权的只读访问,@导入配套)
+        l.add(new SubagentPlugin());      // 子 agent(spawn_task 派独立会话干活)
         l.add(new WebToolsPlugin());      // 最后手段:联网
         l.add(new ActionToolsPlugin());   // 行动类(合成/冶炼/发消息/指令)
-        l.add(new SessionPlugin());       // 会话持久化(事件驱动)
         return l;
     }
 

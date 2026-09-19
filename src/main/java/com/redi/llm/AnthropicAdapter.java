@@ -25,7 +25,7 @@ final class AnthropicAdapter {
     /** Anthropic 协议 max_tokens 必填(无法省略)。思考型模型思考也计入此配额:
      *  挤压时由 LlmClient.bumpMaxTokens() 翻倍扩容(8192→…→131072 探测上限),
      *  服务商不支持时返回 400,引擎自动回退并按"长度截断→续写"处理。 */
-    static final int MAX_TOKENS = 8192;
+    static final int MAX_TOKENS = 32768;
     static final int MAX_TOKENS_CAP = 131072;
 
     private AnthropicAdapter() {
